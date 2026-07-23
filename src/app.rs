@@ -1,8 +1,8 @@
 pub mod commands;
 pub mod state;
 
-use crate::canvas::renderer;
 use crate::session::model::RecordingStatus;
+use crate::{app_colors::registry::ApplicationColorMode, canvas::renderer};
 use eframe::egui;
 use state::AppState;
 
@@ -95,6 +95,99 @@ impl eframe::App for MultiMouseCanvasApp {
                     "Export directory: {}",
                     self.state.settings.export_directory.display()
                 ));
+                ui.separator();
+                ui.label("Application colors");
+                egui::ComboBox::from_label("Color mode")
+                    .selected_text(format!("{:?}", self.state.settings.application_colors.mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.state.settings.application_colors.mode,
+                            ApplicationColorMode::FixedGlobal,
+                            "Fixed global color",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.settings.application_colors.mode,
+                            ApplicationColorMode::ApplicationSpecific,
+                            "Application-specific color",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.settings.application_colors.mode,
+                            ApplicationColorMode::RandomOnce,
+                            "Random once per app",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.settings.application_colors.mode,
+                            ApplicationColorMode::PaletteOnce,
+                            "Palette once per app",
+                        );
+                    });
+                egui::Grid::new("app_color_editor")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Application label");
+                        ui.label("Executable name/path");
+                        ui.label("Assigned color");
+                        ui.label("State");
+                        ui.label("Action");
+                        ui.end_row();
+                        let keys: Vec<String> = self
+                            .state
+                            .settings
+                            .application_colors
+                            .entries
+                            .keys()
+                            .cloned()
+                            .collect();
+                        for key in keys {
+                            let Some(entry) = self
+                                .state
+                                .settings
+                                .application_colors
+                                .entries
+                                .get(&key)
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            ui.label(&entry.label);
+                            ui.label(
+                                entry
+                                    .executable_path
+                                    .as_deref()
+                                    .unwrap_or(&entry.executable_name),
+                            );
+                            let mut color: egui::Color32 = (&entry.resolved_color()).into();
+                            let app_identity = crate::capture::foreground::ApplicationIdentity::new(
+                                0,
+                                entry.executable_name.clone(),
+                                entry.executable_path.clone(),
+                                None,
+                            );
+                            if ui.color_edit_button_srgba(&mut color).changed() {
+                                self.state.settings.application_colors.set_manual_override(
+                                    &app_identity,
+                                    crate::settings::model::RgbaColor::new(
+                                        color.r(),
+                                        color.g(),
+                                        color.b(),
+                                        color.a(),
+                                    ),
+                                );
+                            }
+                            ui.label(if entry.is_manual() {
+                                "Manual"
+                            } else {
+                                "Automatic"
+                            });
+                            if ui.button("Reset").clicked() {
+                                self.state
+                                    .settings
+                                    .application_colors
+                                    .reset_to_automatic(&app_identity);
+                            }
+                            ui.end_row();
+                        }
+                    });
             });
 
             ui.separator();
@@ -131,7 +224,7 @@ impl eframe::App for MultiMouseCanvasApp {
                 ));
             });
 
-            ui.collapsing("Capture placeholders", |ui| {
+            ui.collapsing("Capture status", |ui| {
                 ui.label(match &self.state.current_cursor_sample {
                     Some(sample) => format!(
                         "Cursor sample: ({:.1}, {:.1})",
@@ -145,11 +238,7 @@ impl eframe::App for MultiMouseCanvasApp {
                 ));
                 ui.label(format!(
                     "Foreground application: {}",
-                    self.state
-                        .current_foreground_application
-                        .title
-                        .as_deref()
-                        .unwrap_or("none")
+                    self.state.current_foreground_application.label()
                 ));
             });
         });

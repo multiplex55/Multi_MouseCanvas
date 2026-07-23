@@ -1,5 +1,8 @@
 use super::coordinates::{CanvasPoint, VirtualDesktopBounds};
-use crate::settings::model::{DwellRenderMode, DwellShapeKind, RgbaColor};
+use crate::{
+    capture::foreground::ApplicationIdentity,
+    settings::model::{DwellRenderMode, DwellShapeKind, RgbaColor},
+};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -30,6 +33,7 @@ pub struct MovementPath {
     pub color: RgbaColor,
     pub width: f32,
     pub finalized: bool,
+    pub application: ApplicationIdentity,
 }
 
 impl MovementPath {
@@ -39,6 +43,7 @@ impl MovementPath {
             color,
             width,
             finalized,
+            application: ApplicationIdentity::default(),
         }
     }
 
@@ -64,6 +69,7 @@ pub struct DwellShape {
     pub outline_width: f32,
     pub render_mode: DwellRenderMode,
     pub finalized: bool,
+    pub application: ApplicationIdentity,
 }
 
 impl DwellShape {
@@ -92,6 +98,7 @@ impl DwellShape {
             outline_width,
             render_mode,
             finalized,
+            application: ApplicationIdentity::default(),
         }
     }
 }

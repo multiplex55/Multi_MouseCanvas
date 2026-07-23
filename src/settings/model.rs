@@ -1,3 +1,4 @@
+use crate::app_colors::registry::ApplicationColorRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -74,6 +75,8 @@ pub struct AppSettings {
     pub default_dwell_color: RgbaColor,
     pub background_color: RgbaColor,
     pub app_specific_coloring_enabled: bool,
+    #[serde(default)]
+    pub application_colors: ApplicationColorRegistry,
     pub export_directory: PathBuf,
     pub start_recording_automatically: bool,
     #[serde(default)]
@@ -106,6 +109,7 @@ impl Default for AppSettings {
             default_dwell_color: RgbaColor::new(255, 185, 0, 255),
             background_color: RgbaColor::new(24, 24, 24, 255),
             app_specific_coloring_enabled: true,
+            application_colors: ApplicationColorRegistry::default(),
             export_directory: PathBuf::from("exports"),
             start_recording_automatically: false,
             selected_dwell_shape: DwellShapeKind::Circle,
