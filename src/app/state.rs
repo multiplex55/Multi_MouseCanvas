@@ -4,7 +4,7 @@ use crate::{
         model::{CanvasModel, DwellShape, MovementPath},
     },
     capture::{
-        foreground::ForegroundApplicationPlaceholder,
+        foreground::{ForegroundApplication, ForegroundResolver},
         sampler::{CursorSample, CursorSampler},
         windows::WindowsPollingSampler,
     },
@@ -29,7 +29,8 @@ pub struct AppState {
     pub movement_classifier: MovementClassifier,
     sampler: Option<Box<dyn CursorSampler>>,
     sample_rx: Option<Receiver<CursorSample>>,
-    pub current_foreground_application: ForegroundApplicationPlaceholder,
+    pub current_foreground_application: ForegroundApplication,
+    foreground_resolver: Option<Box<dyn ForegroundResolver>>,
     pub statistics: SessionStatistics,
     pub settings: AppSettings,
     pub status_message: Option<String>,
@@ -46,7 +47,8 @@ impl Default for AppState {
             movement_classifier: MovementClassifier::new(&AppSettings::default()),
             sampler: None,
             sample_rx: None,
-            current_foreground_application: ForegroundApplicationPlaceholder::default(),
+            current_foreground_application: ForegroundApplication::default(),
+            foreground_resolver: None,
             statistics: SessionStatistics::default(),
             settings: AppSettings::default(),
             status_message: None,
@@ -111,6 +113,23 @@ impl AppState {
         self.sample_rx = None;
     }
 
+    #[cfg(test)]
+    pub fn install_foreground_resolver_for_tests(&mut self, resolver: Box<dyn ForegroundResolver>) {
+        self.foreground_resolver = Some(resolver);
+    }
+
+    fn resolve_foreground_for_sample(&mut self) -> ForegroundApplication {
+        let app = match self.foreground_resolver.as_mut() {
+            Some(resolver) => resolver
+                .resolve_foreground()
+                .unwrap_or_else(|_| ForegroundApplication::unknown()),
+            None => crate::capture::windows::resolve_foreground_application()
+                .unwrap_or_else(|_| ForegroundApplication::unknown()),
+        };
+        self.current_foreground_application = app.clone();
+        app
+    }
+
     pub fn drain_samples(&mut self) {
         let mut drained = Vec::new();
         if let Some(rx) = &self.sample_rx {
@@ -121,6 +140,16 @@ impl AppState {
         for sample in drained {
             self.statistics.samples_recorded += 1;
             self.current_cursor_sample = Some(sample.clone());
+            let app = self.resolve_foreground_for_sample();
+            let color = if self.settings.app_specific_coloring_enabled {
+                self.settings
+                    .application_colors
+                    .color_for(&app.identity, &self.settings.default_movement_color)
+            } else {
+                self.settings.default_movement_color.clone()
+            };
+            self.movement_classifier
+                .set_foreground_context(app.identity, color);
             self.movement_classifier.accept_sample(sample);
             self.sync_retained_canvas_and_statistics();
         }
@@ -134,23 +163,23 @@ impl AppState {
             .movement_classifier
             .segments
             .iter()
-            .map(|segment| self.path_from_points(&segment.points, true))
+            .map(|segment| self.path_from_segment(segment, true))
             .collect();
         self.canvas.active_movement_segment = self
             .movement_classifier
             .active_segment()
-            .map(|segment| self.path_from_points(&segment.points, false));
+            .map(|segment| self.path_from_segment(segment, false));
 
         self.canvas.finalized_dwell_shapes = self
             .movement_classifier
             .dwells
             .iter()
-            .map(|dwell| self.dwell_shape(dwell.center_x, dwell.center_y, dwell.duration, true))
+            .map(|dwell| self.dwell_shape_from_event(dwell, true))
             .collect();
         self.canvas.active_dwell_shape = self
             .movement_classifier
             .active_dwell()
-            .map(|dwell| self.dwell_shape(dwell.center_x, dwell.center_y, dwell.duration, false));
+            .map(|dwell| self.dwell_shape_from_event(&dwell, false));
 
         self.statistics.total_cursor_distance = self.movement_classifier.total_distance;
         self.statistics.finalized_dwell_count = self.movement_classifier.dwells.len() as u64;
@@ -174,13 +203,18 @@ impl AppState {
             .unwrap_or(Duration::ZERO);
     }
 
-    fn path_from_points(&self, points: &[(f32, f32)], finalized: bool) -> MovementPath {
+    fn path_from_segment(
+        &self,
+        segment: &crate::session::controller::MovementSegment,
+        finalized: bool,
+    ) -> MovementPath {
         let mut path = MovementPath::new(
-            self.settings.default_movement_color.clone(),
+            segment.color.clone(),
             self.settings.line_width_px,
             finalized,
         );
-        for (x, y) in points {
+        path.application = segment.application.clone();
+        for (x, y) in &segment.points {
             path.push_simplified(
                 CanvasPoint { x: *x, y: *y },
                 self.canvas.point_merge_distance,
@@ -189,11 +223,18 @@ impl AppState {
         path
     }
 
-    fn dwell_shape(&self, x: f32, y: f32, duration: Duration, finalized: bool) -> DwellShape {
-        DwellShape::from_duration(
-            CanvasPoint { x, y },
-            duration,
-            self.settings.default_dwell_color.clone(),
+    fn dwell_shape_from_event(
+        &self,
+        dwell: &crate::session::controller::DwellEvent,
+        finalized: bool,
+    ) -> DwellShape {
+        let mut shape = DwellShape::from_duration(
+            CanvasPoint {
+                x: dwell.center_x,
+                y: dwell.center_y,
+            },
+            dwell.duration,
+            dwell.color.clone(),
             self.settings.selected_dwell_shape,
             self.settings.min_dwell_shape_size,
             self.settings.max_dwell_shape_size,
@@ -202,7 +243,9 @@ impl AppState {
             self.settings.dwell_outline_width,
             self.settings.dwell_render_mode,
             finalized,
-        )
+        );
+        shape.application = dwell.application.clone();
+        shape
     }
 
     pub fn save_settings_as_status(&mut self) {

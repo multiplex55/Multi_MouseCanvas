@@ -14,3 +14,7 @@ Phase 1 does **not** perform global mouse tracking yet. Cursor samples, dwell st
 cargo test
 cargo run
 ```
+
+## Foreground application metadata and privacy
+
+MultiMouseCanvas resolves the foreground application so drawing segments and dwell shapes can be colored by application. By default it stores process metadata only: process ID, executable name, executable path when available, optional window class, and an optional display label. It does **not** collect window titles, typed text, window contents, browser URLs, clicks, or keyboard data.

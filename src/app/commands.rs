@@ -84,6 +84,42 @@ mod tests {
         state.stop_sampler();
     }
 
+    struct FailingResolver;
+
+    impl crate::capture::foreground::ForegroundResolver for FailingResolver {
+        fn resolve_foreground(
+            &mut self,
+        ) -> Result<
+            crate::capture::foreground::ForegroundApplication,
+            crate::capture::foreground::ForegroundError,
+        > {
+            Err(crate::capture::foreground::ForegroundError(
+                "boom".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    fn unknown_foreground_resolution_falls_back_without_error() {
+        let now = std::time::Instant::now();
+        let mut state = AppState::default();
+        state.install_foreground_resolver_for_tests(Box::new(FailingResolver));
+        state.install_sampler_for_tests(Box::new(crate::capture::sampler::FakeCursorSampler::new(
+            vec![crate::capture::sampler::CursorSample::new(now, 1.0, 2.0)],
+        )));
+        state.start_sampler();
+        state.drain_samples();
+        state.stop_sampler();
+        assert_eq!(state.statistics.samples_recorded, 1);
+        assert_eq!(
+            state
+                .current_foreground_application
+                .identity
+                .executable_name,
+            "unknown/system"
+        );
+    }
+
     #[test]
     fn recording_status_command_transitions() {
         let mut state = AppState::default();
