@@ -20,6 +20,7 @@ impl MultiMouseCanvasApp {
 
 impl eframe::App for MultiMouseCanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.state.drain_samples();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("MultiMouseCanvas");
             ui.label("Windows-first multi-mouse canvas recorder");
@@ -125,13 +126,13 @@ impl eframe::App for MultiMouseCanvasApp {
                 ui.label(match &self.state.current_cursor_sample {
                     Some(sample) => format!(
                         "Cursor sample: ({:.1}, {:.1})",
-                        sample.screen_x, sample.screen_y
+                        sample.physical_x, sample.physical_y
                     ),
                     None => "Cursor sample: none".to_owned(),
                 });
                 ui.label(format!(
-                    "Dwell active: {}",
-                    self.state.current_dwell_state.is_dwelling
+                    "Dwell visible: {}",
+                    self.state.movement_classifier.current_dwell_visible()
                 ));
                 ui.label(format!(
                     "Foreground application: {}",
@@ -146,6 +147,7 @@ impl eframe::App for MultiMouseCanvasApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.state.stop_sampler();
         self.state.save_settings_as_status();
     }
 }
