@@ -6,6 +6,9 @@ impl AppState {
         if self.recording_status == RecordingStatus::Stopped {
             self.recording_status = RecordingStatus::Recording;
             self.mark_started_now();
+            self.movement_classifier =
+                crate::session::controller::MovementClassifier::new(&self.settings);
+            self.start_sampler();
             self.status_message = Some("Recording started.".to_owned());
         }
     }
@@ -13,6 +16,9 @@ impl AppState {
     pub fn pause_recording(&mut self) {
         if self.recording_status == RecordingStatus::Recording {
             self.recording_status = RecordingStatus::Paused;
+            self.stop_sampler();
+            self.movement_classifier
+                .mark_discontinuity(crate::session::controller::DiscontinuityReason::PauseResume);
             self.status_message = Some("Recording paused.".to_owned());
         }
     }
@@ -20,6 +26,9 @@ impl AppState {
     pub fn resume_recording(&mut self) {
         if self.recording_status == RecordingStatus::Paused {
             self.recording_status = RecordingStatus::Recording;
+            self.movement_classifier
+                .mark_discontinuity(crate::session::controller::DiscontinuityReason::PauseResume);
+            self.start_sampler();
             self.status_message = Some("Recording resumed.".to_owned());
         }
     }
@@ -38,6 +47,8 @@ impl AppState {
             RecordingStatus::Recording | RecordingStatus::Paused
         ) {
             self.recording_status = RecordingStatus::Stopped;
+            self.stop_sampler();
+            self.movement_classifier.finalize_active_segment();
             self.timing.started_at = None;
             self.status_message = Some("Session finished.".to_owned());
         }
@@ -51,6 +62,8 @@ impl AppState {
         }
         self.canvas.clear();
         self.statistics.reset();
+        self.movement_classifier =
+            crate::session::controller::MovementClassifier::new(&self.settings);
         self.status_message = Some("Canvas and statistics cleared.".to_owned());
     }
 }
@@ -59,6 +72,15 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::canvas::coordinates::CanvasPoint;
+
+    #[test]
+    fn can_install_fake_sampler_for_state_tests() {
+        let mut state = AppState::default();
+        let sampler = crate::capture::sampler::FakeCursorSampler::new(Vec::new());
+        state.install_sampler_for_tests(Box::new(sampler));
+        state.start_sampler();
+        state.stop_sampler();
+    }
 
     #[test]
     fn recording_status_command_transitions() {
