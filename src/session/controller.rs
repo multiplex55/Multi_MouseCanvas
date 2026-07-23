@@ -149,7 +149,7 @@ impl MovementClassifier {
         }
     }
 
-    fn finalize_dwell(&mut self) {
+    pub fn finalize_dwell(&mut self) {
         if let (Some(candidate), Some(previous)) =
             (self.dwell_candidate.take(), self.previous_accepted.as_ref())
         {
@@ -179,6 +179,41 @@ impl MovementClassifier {
 
     pub fn current_dwell_visible(&self) -> bool {
         self.dwell_candidate.as_ref().is_some_and(|d| d.visible)
+    }
+
+    pub fn current_dwell_duration(&self) -> Duration {
+        match (
+            self.dwell_candidate.as_ref(),
+            self.previous_accepted.as_ref(),
+        ) {
+            (Some(candidate), Some(previous)) if candidate.visible => previous
+                .timestamp
+                .saturating_duration_since(candidate.start_time),
+            _ => Duration::ZERO,
+        }
+    }
+
+    pub fn active_segment(&self) -> Option<&MovementSegment> {
+        self.active_segment.as_ref()
+    }
+
+    pub fn active_dwell(&self) -> Option<DwellEvent> {
+        let candidate = self.dwell_candidate.as_ref()?;
+        let previous = self.previous_accepted.as_ref()?;
+        if !candidate.visible {
+            return None;
+        }
+        let duration = previous
+            .timestamp
+            .saturating_duration_since(candidate.start_time);
+        Some(DwellEvent {
+            start_time: candidate.start_time,
+            center_x: candidate.center_x,
+            center_y: candidate.center_y,
+            duration,
+            size: duration.as_secs_f32() * self.dwell_growth_rate,
+            visible: true,
+        })
     }
 }
 

@@ -48,7 +48,9 @@ impl AppState {
         ) {
             self.recording_status = RecordingStatus::Stopped;
             self.stop_sampler();
+            self.movement_classifier.finalize_dwell();
             self.movement_classifier.finalize_active_segment();
+            self.sync_retained_canvas_and_statistics();
             self.timing.started_at = None;
             self.status_message = Some("Session finished.".to_owned());
         }
@@ -71,7 +73,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::coordinates::CanvasPoint;
+    use crate::canvas::{coordinates::CanvasPoint, model::MovementPath};
 
     #[test]
     fn can_install_fake_sampler_for_state_tests() {
@@ -100,14 +102,16 @@ mod tests {
     #[test]
     fn clear_command_resets_canvas_and_statistics_placeholders() {
         let mut state = AppState::default();
-        state.canvas.points.push(CanvasPoint { x: 1.0, y: 2.0 });
+        let mut path = MovementPath::new(state.settings.default_movement_color.clone(), 2.0, true);
+        path.points.push(CanvasPoint { x: 1.0, y: 2.0 });
+        state.canvas.finalized_movement_paths.push(path);
         state.statistics.samples_recorded = 10;
         state.statistics.movements_recorded = 5;
         state.statistics.dwell_events = 2;
 
         state.clear_canvas_when_safe();
 
-        assert!(state.canvas.points.is_empty());
+        assert!(state.canvas.is_empty());
         assert_eq!(state.statistics.samples_recorded, 0);
         assert_eq!(state.statistics.movements_recorded, 0);
         assert_eq!(state.statistics.dwell_events, 0);

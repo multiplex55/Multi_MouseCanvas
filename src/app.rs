@@ -99,11 +99,7 @@ impl eframe::App for MultiMouseCanvasApp {
 
             ui.separator();
             ui.heading("Canvas preview");
-            renderer::render_preview(
-                ui,
-                &self.state.canvas,
-                (&self.state.settings.background_color).into(),
-            );
+            renderer::render_preview(ui, &self.state.canvas);
 
             ui.separator();
             ui.heading("Session statistics");
@@ -112,13 +108,26 @@ impl eframe::App for MultiMouseCanvasApp {
                     "Samples: {}",
                     self.state.statistics.samples_recorded
                 ));
+                columns[0].label(format!(
+                    "Session duration: {:.1}s",
+                    self.state.statistics.session_duration.as_secs_f32()
+                ));
                 columns[1].label(format!(
-                    "Movements: {}",
-                    self.state.statistics.movements_recorded
+                    "Distance: {:.1}px",
+                    self.state.statistics.total_cursor_distance
+                ));
+                columns[1].label(format!(
+                    "Movement segments: {}",
+                    self.state.statistics.movement_segment_count
                 ));
                 columns[2].label(format!(
-                    "Dwell events: {}",
-                    self.state.statistics.dwell_events
+                    "Finalized dwells: {}",
+                    self.state.statistics.finalized_dwell_count
+                ));
+                columns[2].label(format!(
+                    "Current/longest dwell: {:.1}s / {:.1}s",
+                    self.state.statistics.current_dwell_duration.as_secs_f32(),
+                    self.state.statistics.longest_dwell.as_secs_f32()
                 ));
             });
 
