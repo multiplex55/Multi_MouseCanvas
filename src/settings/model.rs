@@ -21,6 +21,48 @@ impl From<&RgbaColor> for egui::Color32 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DwellShapeKind {
+    Circle,
+    Triangle,
+    Square,
+}
+
+impl Default for DwellShapeKind {
+    fn default() -> Self {
+        Self::Circle
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DwellRenderMode {
+    Fill,
+    Outline,
+    FillAndOutline,
+}
+
+impl Default for DwellRenderMode {
+    fn default() -> Self {
+        Self::FillAndOutline
+    }
+}
+
+const fn default_min_dwell_shape_size() -> f32 {
+    12.0
+}
+const fn default_max_dwell_shape_size() -> f32 {
+    96.0
+}
+const fn default_dwell_fill_opacity() -> f32 {
+    0.45
+}
+const fn default_dwell_outline_width() -> f32 {
+    2.0
+}
+const fn default_movement_smoothing_enabled() -> Option<bool> {
+    Some(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub sampling_interval_ms: u64,
@@ -34,6 +76,22 @@ pub struct AppSettings {
     pub app_specific_coloring_enabled: bool,
     pub export_directory: PathBuf,
     pub start_recording_automatically: bool,
+    #[serde(default)]
+    pub selected_dwell_shape: DwellShapeKind,
+    #[serde(default = "default_min_dwell_shape_size")]
+    pub min_dwell_shape_size: f32,
+    #[serde(default = "default_max_dwell_shape_size")]
+    pub max_dwell_shape_size: f32,
+    #[serde(default = "default_dwell_fill_opacity")]
+    pub dwell_fill_opacity: f32,
+    #[serde(default = "default_dwell_outline_width")]
+    pub dwell_outline_width: f32,
+    #[serde(default)]
+    pub dwell_render_mode: DwellRenderMode,
+    #[serde(default)]
+    pub transparent_canvas_mode: bool,
+    #[serde(default = "default_movement_smoothing_enabled")]
+    pub movement_smoothing_enabled: Option<bool>,
 }
 
 impl Default for AppSettings {
@@ -50,6 +108,14 @@ impl Default for AppSettings {
             app_specific_coloring_enabled: true,
             export_directory: PathBuf::from("exports"),
             start_recording_automatically: false,
+            selected_dwell_shape: DwellShapeKind::Circle,
+            min_dwell_shape_size: 12.0,
+            max_dwell_shape_size: 96.0,
+            dwell_fill_opacity: 0.45,
+            dwell_outline_width: 2.0,
+            dwell_render_mode: DwellRenderMode::FillAndOutline,
+            transparent_canvas_mode: false,
+            movement_smoothing_enabled: Some(true),
         }
     }
 }
@@ -78,6 +144,14 @@ mod tests {
         assert!(settings.app_specific_coloring_enabled);
         assert_eq!(settings.export_directory, PathBuf::from("exports"));
         assert!(!settings.start_recording_automatically);
+        assert_eq!(settings.selected_dwell_shape, DwellShapeKind::Circle);
+        assert_eq!(settings.min_dwell_shape_size, 12.0);
+        assert_eq!(settings.max_dwell_shape_size, 96.0);
+        assert_eq!(settings.dwell_fill_opacity, 0.45);
+        assert_eq!(settings.dwell_outline_width, 2.0);
+        assert_eq!(settings.dwell_render_mode, DwellRenderMode::FillAndOutline);
+        assert!(!settings.transparent_canvas_mode);
+        assert_eq!(settings.movement_smoothing_enabled, Some(true));
     }
 
     #[test]
@@ -101,5 +175,8 @@ mod tests {
         assert_eq!(settings.sampling_interval_ms, 20);
         assert_eq!(settings.export_directory, PathBuf::from("custom_exports"));
         assert!(settings.start_recording_automatically);
+        assert_eq!(settings.min_dwell_shape_size, 12.0);
+        assert_eq!(settings.max_dwell_shape_size, 96.0);
+        assert_eq!(settings.movement_smoothing_enabled, Some(true));
     }
 }
