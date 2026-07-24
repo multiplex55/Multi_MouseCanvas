@@ -1,9 +1,10 @@
 use super::state::AppState;
 use crate::{
-    export::image_export::{export_png, ExportBackground, ExportOptions},
+    export::image_export::{export_image, ExportBackground, ExportFormat, ExportOptions},
     session::{
+        manifest::{create_session_directory, SessionManifest, RECOVERY_SCHEMA_VERSION},
         model::RecordingStatus,
-        recovery::{self, RecoveryState},
+        recovery::{self},
     },
 };
 use std::time::SystemTime;
@@ -226,9 +227,21 @@ impl AppState {
             }
             self.recording_status = RecordingStatus::Recording;
             self.mark_started_now();
+            if let Some(root) = self.recovery_path.clone() {
+                if root.file_name().and_then(|n| n.to_str()) == Some("recovery") {
+                    match create_session_directory(&root, SystemTime::now()) {
+                        Ok((_id, dir)) => self.recovery_path = Some(dir),
+                        Err(e) => {
+                            self.status_message =
+                                Some(format!("Recovery directory unavailable: {e}"))
+                        }
+                    }
+                }
+            }
             self.movement_classifier =
                 crate::session::controller::MovementClassifier::new(&self.settings);
             self.start_sampler();
+            self.autosave_recovery(false);
             self.status_message = Some("Recording started.".to_owned());
         }
     }
@@ -250,6 +263,7 @@ impl AppState {
             self.movement_classifier
                 .mark_discontinuity(crate::session::controller::DiscontinuityReason::PauseResume);
             self.start_sampler();
+            self.autosave_recovery(false);
             self.status_message = Some("Recording resumed.".to_owned());
         }
     }
@@ -285,25 +299,26 @@ impl AppState {
     }
 
     pub fn export_canvas_to_default(&mut self) {
-        let options = ExportOptions {
-            destination: None,
-            default_directory: self.settings.export_directory.clone(),
-            session_name: Some("session".to_owned()),
-            timestamp: SystemTime::now(),
-            custom_size: None,
-            background: if self.settings.transparent_canvas_mode {
-                ExportBackground::Transparent
-            } else {
-                ExportBackground::Solid
-            },
+        let mut options = ExportOptions::basic(self.settings.export_directory.clone());
+        options.timestamp = SystemTime::now();
+        options.format = ExportFormat::Png;
+        options.background = if self.settings.transparent_canvas_mode {
+            ExportBackground::Transparent
+        } else {
+            ExportBackground::Solid(self.settings.background_color.clone())
         };
-        match export_png(&self.canvas, &options) {
-            Ok(path) => {
-                self.has_unexported_canvas = false;
-                self.status_message = Some(format!("Exported PNG to {}", path.display()));
-            }
-            Err(e) => self.status_message = Some(format!("Export failed: {e}")),
+        if self.export_busy {
+            return;
         }
+        let canvas = self.canvas.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.export_rx = Some(rx);
+        self.export_busy = true;
+        self.export_progress = 0.05;
+        self.status_message = Some("Export running in background…".into());
+        std::thread::spawn(move || {
+            let _ = tx.send(export_image(&canvas, &options).map_err(|e| e.to_string()));
+        });
     }
 
     pub fn clear_canvas_when_safe(&mut self) {
@@ -320,6 +335,15 @@ impl AppState {
         self.status_message = Some("Canvas and statistics cleared.".to_owned());
     }
 
+    pub fn export_and_start_new_session(&mut self) {
+        if self.export_busy {
+            return;
+        }
+        self.pending_new_session_decision = false;
+        self.export_start_new = true;
+        self.export_canvas_to_default();
+    }
+
     pub(crate) fn clear_canvas_internal(&mut self) {
         self.canvas.clear();
         self.statistics.reset();
@@ -331,25 +355,51 @@ impl AppState {
     pub fn autosave_recovery(&mut self, completed: bool) {
         self.sync_retained_canvas_and_statistics();
         if let Some(path) = &self.recovery_path {
-            let state = RecoveryState {
-                canvas: self.canvas.clone(),
-                session_name: None,
+            let manifest = SessionManifest {
+                schema_version: RECOVERY_SCHEMA_VERSION,
+                session_id: path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("session")
+                    .to_owned(),
+                started_at: self.timing.started_at.unwrap_or(SystemTime::UNIX_EPOCH),
                 saved_at: SystemTime::now(),
-                application_colors: self.settings.application_colors.clone(),
-                statistics: self.statistics.clone(),
-                virtual_desktop_bounds: self.canvas.session_desktop_bounds,
                 completed,
+                recording_status: self.recording_status,
+                session_bounds: self.canvas.session_desktop_bounds,
+                current_topology: self.canvas.current_topology.clone(),
+                topology_history: self.canvas.topology_history.clone(),
+                statistics: self.statistics.clone(),
+                background: self.canvas.background.clone(),
+                tile_size: self.canvas.sparse_tiles.tile_size,
+                pixel_format: "RGBA8".into(),
+                application_colors: self.settings.application_colors.clone(),
+                tiles: self
+                    .canvas
+                    .sparse_tiles
+                    .tiles
+                    .keys()
+                    .map(|c| recovery::tile_filename(*c))
+                    .collect(),
             };
-            let _ = recovery::save_recovery(path, &state);
+            if let Err(e) = recovery::save_session(path, &manifest, &mut self.canvas.sparse_tiles) {
+                tracing::warn!(%e, "non-fatal recovery save failed");
+                self.status_message =
+                    Some(format!("Recovery save failed; recording continues: {e}"));
+            }
         }
     }
 
     pub fn restore_recovery(&mut self) {
         if let Some(path) = &self.recovery_path {
-            if let Ok(r) = recovery::load_recovery(path) {
-                self.canvas = r.canvas;
-                self.statistics = r.statistics;
-                self.settings.application_colors = r.application_colors;
+            if let Ok((m, canvas)) = recovery::restore_canvas(path) {
+                self.canvas = canvas;
+                self.statistics = m.statistics;
+                self.settings.application_colors = m.application_colors;
+                self.recording_status = RecordingStatus::Stopped;
+                self.movement_classifier.mark_discontinuity(
+                    crate::session::controller::DiscontinuityReason::PauseResume,
+                );
                 self.has_unexported_canvas = true;
                 self.status_message = Some("Recovered incomplete session canvas.".to_owned());
             }

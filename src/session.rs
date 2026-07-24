@@ -1,6 +1,7 @@
 pub mod controller;
 pub mod engine;
 pub mod events;
+pub mod manifest;
 pub mod model;
 pub mod path_builder;
 pub mod recovery;

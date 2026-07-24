@@ -28,8 +28,18 @@ impl LifecycleDialogState {
     }
 }
 pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) {
+    if state.export_busy {
+        egui::Window::new("Exporting")
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Compositing full session tiles on a worker thread. Recording remains active.",
+                );
+                ui.add(egui::ProgressBar::new(state.export_progress).animate(true));
+            });
+    }
     if state.pending_new_session_decision {
-        egui::Window::new("Start new session?").collapsible(false).show(ctx, |ui| { ui.label("Existing activity is present. Choose how to proceed; no unexported canvas data will be silently deleted."); ui.horizontal(|ui| { if ui.button("Resume if paused").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} if ui.button("Preserve recovery and start new session").clicked(){state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);} if ui.button("Export and start new session").clicked(){state.apply_command(crate::app::commands::AppCommand::ExportCurrentCanvas); state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);} if ui.button("Cancel").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} }); });
+        egui::Window::new("Start new session?").collapsible(false).show(ctx, |ui| { ui.label("Existing activity is present. Choose how to proceed; no unexported canvas data will be silently deleted."); ui.horizontal(|ui| { if ui.button("Resume if paused").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} if ui.button("Preserve recovery and start new session").clicked(){state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);} if ui.button("Export and start new session").clicked(){state.export_and_start_new_session();} if ui.button("Cancel").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} }); });
     }
     if state.lifecycle_dialogs.clear_confirmation_open {
         egui::Window::new("Clear canvas?")
