@@ -77,6 +77,21 @@ mod tests {
 
         assert_eq!(loaded, settings);
     }
+
+    #[test]
+    fn parse_failure_never_overwrites_user_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "{ user data that needs repair").unwrap();
+        assert!(matches!(
+            load_or_default(&path),
+            Err(SettingsError::Parse { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "{ user data that needs repair"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]

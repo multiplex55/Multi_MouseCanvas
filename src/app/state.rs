@@ -38,7 +38,7 @@ pub struct AppState {
     pub has_unexported_canvas: bool,
     pub pending_new_session_decision: bool,
     pub recovery_path: Option<PathBuf>,
-    pub samples_since_autosave: u64,
+    last_recovery_save: Instant,
     last_topology_refresh: Instant,
     pub settings_path: Option<PathBuf>,
     pub exit_requested: bool,
@@ -70,7 +70,7 @@ impl Default for AppState {
             has_unexported_canvas: false,
             pending_new_session_decision: false,
             recovery_path: None,
-            samples_since_autosave: 0,
+            last_recovery_save: Instant::now(),
             last_topology_refresh: Instant::now(),
             settings_path: None,
             exit_requested: false,
@@ -220,11 +220,12 @@ impl AppState {
             self.movement_classifier
                 .set_foreground_context(app.identity, color);
             self.movement_classifier.accept_sample(sample);
-            self.sync_retained_canvas_and_statistics();
-            self.samples_since_autosave += 1;
-            if self.samples_since_autosave >= 60 {
+            self.commit_classifier_output();
+            if self.last_recovery_save.elapsed()
+                >= Duration::from_millis(self.settings.recovery_interval_ms)
+            {
                 self.autosave_recovery(false);
-                self.samples_since_autosave = 0;
+                self.last_recovery_save = Instant::now();
             }
         }
     }
@@ -258,85 +259,75 @@ impl AppState {
         }
     }
 
-    pub fn sync_retained_canvas_and_statistics(&mut self) {
+    /// Rasterize completed classifier output immediately and retain only live overlays.
+    pub fn commit_classifier_output(&mut self) {
         self.canvas.background.color = self.settings.background_color.clone();
         self.canvas.background.transparent = self.settings.transparent_canvas_mode;
 
-        let segments_len = self.movement_classifier.segments.len();
-        for segment in self
-            .movement_classifier
-            .segments
-            .iter()
-            .skip(self.canvas.committed_movement_count)
-        {
-            let path = self.path_from_segment(segment, true);
+        for segment in self.movement_classifier.segments.drain(..) {
+            let mut path = MovementPath::new(segment.color, self.settings.line_width_px, true);
+            path.application = segment.application;
+            path.points = segment
+                .points
+                .into_iter()
+                .map(|(x, y)| CanvasPoint { x, y })
+                .collect();
             rasterize_movement_path(&mut self.canvas.sparse_tiles, &path);
             self.canvas.tile_generation += 1;
+            self.statistics.movement_segment_count += 1;
+            self.statistics.movements_recorded += 1;
         }
-        self.canvas.committed_movement_count = segments_len;
-        self.canvas.active_movement_overlay = self
-            .movement_classifier
-            .active_segment()
-            .map(|segment| self.path_from_segment(segment, false));
-
-        let dwells_len = self.movement_classifier.dwells.len();
-        for dwell in self
-            .movement_classifier
-            .dwells
-            .iter()
-            .skip(self.canvas.committed_dwell_count)
-        {
-            let shape = self.dwell_shape_from_event(dwell, true);
+        for dwell in self.movement_classifier.dwells.drain(..) {
+            let shape = DwellShape::from_duration(
+                CanvasPoint {
+                    x: dwell.center_x,
+                    y: dwell.center_y,
+                },
+                dwell.duration,
+                dwell.color,
+                self.settings.selected_dwell_shape,
+                self.settings.min_dwell_shape_size,
+                self.settings.max_dwell_shape_size,
+                self.settings.dwell_growth_rate,
+                self.settings.dwell_fill_opacity,
+                self.settings.dwell_outline_width,
+                self.settings.dwell_render_mode,
+                true,
+            );
             rasterize_dwell_shape(&mut self.canvas.sparse_tiles, &shape);
             self.canvas.tile_generation += 1;
+            self.statistics.finalized_dwell_count += 1;
+            self.statistics.dwell_events += 1;
+            self.statistics.longest_dwell = self.statistics.longest_dwell.max(dwell.duration);
         }
-        self.canvas.committed_dwell_count = dwells_len;
+        self.canvas.active_movement_overlay =
+            self.movement_classifier.active_segment().map(|segment| {
+                let mut path =
+                    MovementPath::new(segment.color.clone(), self.settings.line_width_px, false);
+                path.application = segment.application.clone();
+                path.points = segment
+                    .points
+                    .iter()
+                    .map(|(x, y)| CanvasPoint { x: *x, y: *y })
+                    .collect();
+                path
+            });
         self.canvas.active_dwell_overlay = self
             .movement_classifier
             .active_dwell()
             .map(|dwell| self.dwell_shape_from_event(&dwell, false));
-        self.canvas.refresh_dimensions();
-
         self.statistics.total_cursor_distance = self.movement_classifier.total_distance;
-        self.statistics.finalized_dwell_count = self.movement_classifier.dwells.len() as u64;
-        self.statistics.dwell_events = self.statistics.finalized_dwell_count;
         self.statistics.current_dwell_duration = self.movement_classifier.current_dwell_duration();
         self.statistics.longest_dwell = self
-            .movement_classifier
-            .dwells
-            .iter()
-            .map(|d| d.duration)
-            .chain(std::iter::once(self.statistics.current_dwell_duration))
-            .max()
-            .unwrap_or(Duration::ZERO);
-        self.statistics.movement_segment_count = self.movement_classifier.segments.len() as u64
-            + u64::from(self.movement_classifier.active_segment().is_some());
-        self.statistics.movements_recorded = self.statistics.movement_segment_count;
+            .statistics
+            .longest_dwell
+            .max(self.statistics.current_dwell_duration);
         self.statistics.session_duration = self
             .timing
             .started_at
             .and_then(|started| started.elapsed().ok())
             .unwrap_or(Duration::ZERO);
-    }
-
-    fn path_from_segment(
-        &self,
-        segment: &crate::session::controller::MovementSegment,
-        finalized: bool,
-    ) -> MovementPath {
-        let mut path = MovementPath::new(
-            segment.color.clone(),
-            self.settings.line_width_px,
-            finalized,
-        );
-        path.application = segment.application.clone();
-        for (x, y) in &segment.points {
-            path.push_simplified(
-                CanvasPoint { x: *x, y: *y },
-                self.canvas.point_merge_distance,
-            );
-        }
-        path
+        self.canvas.refresh_dimensions();
     }
 
     fn dwell_shape_from_event(

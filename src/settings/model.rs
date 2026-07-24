@@ -292,6 +292,15 @@ mod tests {
 
 impl AppSettings {
     pub fn validate(&mut self) {
+        if !self.movement_threshold_px.is_finite() {
+            self.movement_threshold_px = AppSettings::default().movement_threshold_px;
+        }
+        if !self.dwell_growth_rate.is_finite() {
+            self.dwell_growth_rate = AppSettings::default().dwell_growth_rate;
+        }
+        if !self.export_scale.is_finite() {
+            self.export_scale = AppSettings::default().export_scale;
+        }
         self.sampling_interval_ms = self.sampling_interval_ms.clamp(1, 10_000);
         self.movement_threshold_px = self.movement_threshold_px.clamp(0.0, 10_000.0);
         self.dwell_tolerance_radius_px = self.dwell_tolerance_radius_px.clamp(1.0, 10_000.0);
@@ -308,5 +317,30 @@ impl AppSettings {
         self.dwell_outline_width = self.dwell_outline_width.clamp(0.0, 1024.0);
         self.export_scale = self.export_scale.clamp(0.1, 16.0);
         self.recovery_interval_ms = self.recovery_interval_ms.clamp(1_000, 3_600_000);
+    }
+}
+
+#[cfg(test)]
+mod migration_validation_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_and_out_of_range_numbers_default_or_clamp() {
+        let mut settings = AppSettings::default();
+        settings.sampling_interval_ms = 0;
+        settings.movement_threshold_px = f32::NAN;
+        settings.dwell_growth_rate = f32::INFINITY;
+        settings.export_scale = 999.0;
+        settings.validate();
+        assert_eq!(settings.sampling_interval_ms, 1);
+        assert_eq!(
+            settings.movement_threshold_px,
+            AppSettings::default().movement_threshold_px
+        );
+        assert_eq!(
+            settings.dwell_growth_rate,
+            AppSettings::default().dwell_growth_rate
+        );
+        assert_eq!(settings.export_scale, 16.0);
     }
 }

@@ -23,7 +23,7 @@ pub enum AppCommand {
 
 impl AppCommand {
     pub fn wire_sources() -> &'static [&'static str] {
-        &["ui", "tray", "cli"]
+        &["ui", "tray", "ipc", "cli"]
     }
 }
 
@@ -40,6 +40,8 @@ pub fn cli_help_text() -> &'static str {
      --pause     Pause recording without collecting mouse samples\n\
      --resume    Resume recording mouse position samples\n\
      --finish    Finish the session and stop recording\n\
+     --export    Export the current canvas\n\
+     --exit      Exit the running application\n\
      --help      Print this help text\n\n\
      Privacy: commands control mouse-position recording only; they do not collect clicks, keyboard input, screenshots, window contents, browser URLs, or window titles by default."
 }
@@ -56,6 +58,8 @@ where
             "--pause" => Ok(AppCommand::PauseRecording),
             "--resume" => Ok(AppCommand::ResumeRecording),
             "--finish" => Ok(AppCommand::FinishSession),
+            "--export" => Ok(AppCommand::ExportCurrentCanvas),
+            "--exit" => Ok(AppCommand::Exit),
             "--help" | "-h" => Err(CliParseError::HelpRequested),
             other => Err(CliParseError::UnknownArgument(other.to_owned())),
         })
@@ -123,13 +127,18 @@ mod tests {
     #[test]
     fn parses_cli_arguments_into_app_commands() {
         assert_eq!(
-            parse_cli_args(["--start", "--show", "--pause", "--resume", "--finish"]).unwrap(),
+            parse_cli_args([
+                "--start", "--show", "--pause", "--resume", "--finish", "--export", "--exit"
+            ])
+            .unwrap(),
             vec![
                 AppCommand::StartRecording,
                 AppCommand::Show,
                 AppCommand::PauseRecording,
                 AppCommand::ResumeRecording,
-                AppCommand::FinishSession
+                AppCommand::FinishSession,
+                AppCommand::ExportCurrentCanvas,
+                AppCommand::Exit,
             ]
         );
         assert_eq!(
@@ -139,7 +148,7 @@ mod tests {
     }
     #[test]
     fn ui_tray_and_cli_share_command_enum() {
-        assert_eq!(AppCommand::wire_sources(), &["ui", "tray", "cli"]);
+        assert_eq!(AppCommand::wire_sources(), &["ui", "tray", "ipc", "cli"]);
     }
 
     #[test]
@@ -285,7 +294,7 @@ impl AppState {
             self.movement_classifier.finalize_active_segment();
             self.movement_classifier.finalize_dwell();
             self.recording_status = RecordingStatus::Stopped;
-            self.sync_retained_canvas_and_statistics();
+            self.commit_classifier_output();
             self.timing.started_at = None;
             self.has_unexported_canvas = !self.canvas.is_empty();
             self.autosave_recovery(true);
@@ -353,7 +362,7 @@ impl AppState {
     }
 
     pub fn autosave_recovery(&mut self, completed: bool) {
-        self.sync_retained_canvas_and_statistics();
+        self.commit_classifier_output();
         if let Some(path) = &self.recovery_path {
             let manifest = SessionManifest {
                 schema_version: RECOVERY_SCHEMA_VERSION,

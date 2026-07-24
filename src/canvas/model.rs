@@ -117,8 +117,6 @@ pub struct CanvasModel {
     pub active_movement_overlay: Option<MovementPath>,
     pub active_dwell_overlay: Option<DwellShape>,
     pub point_merge_distance: f32,
-    pub committed_movement_count: usize,
-    pub committed_dwell_count: usize,
     pub tile_generation: u64,
     #[serde(skip)]
     pub dimensions: (f32, f32),
@@ -139,8 +137,6 @@ impl Default for CanvasModel {
             active_movement_overlay: None,
             active_dwell_overlay: None,
             point_merge_distance: DEFAULT_POINT_MERGE_DISTANCE,
-            committed_movement_count: 0,
-            committed_dwell_count: 0,
             tile_generation: 0,
             dimensions: (
                 session_desktop_bounds.width(),
@@ -155,8 +151,6 @@ impl CanvasModel {
         self.sparse_tiles.tiles.clear();
         self.active_movement_overlay = None;
         self.active_dwell_overlay = None;
-        self.committed_movement_count = 0;
-        self.committed_dwell_count = 0;
     }
 
     pub fn is_empty(&self) -> bool {
