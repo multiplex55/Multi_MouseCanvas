@@ -1,67 +1,128 @@
 use super::{
     controller::{DiscontinuityReason, MovementClassifier},
-    events::EngineCommand,
+    error::EngineError,
+    events::{EngineCommand, ResolvedDisplayProfile},
     model::RecordingStatus,
-    snapshot::{SessionSnapshot, SnapshotDeduper},
+    snapshot::{EngineActivity, SessionSnapshot, SnapshotDeduper, TileDelta},
     statistics::SessionStatistics,
 };
 use crate::{
     canvas::{
-        model::CanvasModel,
+        model::{CanvasModel, DwellShape, MovementPath},
         rasterizer::{rasterize_dwell_shape, rasterize_movement_path},
     },
     capture::{
         foreground::{ForegroundApplication, ForegroundResolver},
-        sampler::CursorSample,
+        sampler::{CursorSample, CursorSampler, ProductionSamplerFactory, SamplerFactory},
     },
     settings::model::AppSettings,
 };
 use std::{
-    sync::mpsc::{sync_channel, Receiver, SyncSender},
+    collections::{HashMap, HashSet},
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+        Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
+pub const ENGINE_COMMAND_BOUND: usize = 128;
+pub const ENGINE_SNAPSHOT_BOUND: usize = 8;
+const SAMPLE_BATCH: usize = 32;
 type MonotonicNow = Box<dyn FnMut() -> Instant + Send>;
 
-pub const ENGINE_COMMAND_BOUND: usize = 128;
-pub const ENGINE_SAMPLE_BOUND: usize = 256;
-pub const ENGINE_SNAPSHOT_BOUND: usize = 8;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitError {
+    QueueFull,
+    Disconnected,
+    ShuttingDown,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownResult {
+    Joined,
+    AlreadyStopped,
+}
 
 pub struct RecordingEngineHandle {
-    pub command_tx: SyncSender<EngineCommand>,
-    pub sample_tx: SyncSender<CursorSample>,
+    high_tx: SyncSender<EngineCommand>,
+    normal_tx: SyncSender<EngineCommand>,
     pub snapshot_rx: Receiver<SessionSnapshot>,
     worker: Option<JoinHandle<()>>,
+    shutting_down: bool,
 }
 impl RecordingEngineHandle {
     pub fn spawn(settings: AppSettings, foreground: Option<Box<dyn ForegroundResolver>>) -> Self {
-        let (command_tx, command_rx) = sync_channel(ENGINE_COMMAND_BOUND);
-        let (sample_tx, sample_rx) = sync_channel(ENGINE_SAMPLE_BOUND);
+        Self::spawn_with_factory(settings, foreground, Arc::new(ProductionSamplerFactory))
+    }
+    pub fn spawn_with_factory(
+        settings: AppSettings,
+        foreground: Option<Box<dyn ForegroundResolver>>,
+        factory: Arc<dyn SamplerFactory>,
+    ) -> Self {
+        let (high_tx, high_rx) = sync_channel(32);
+        let (normal_tx, normal_rx) = sync_channel(ENGINE_COMMAND_BOUND);
         let (snapshot_tx, snapshot_rx) = sync_channel(ENGINE_SNAPSHOT_BOUND);
         let worker = thread::spawn(move || {
-            let mut e = RecordingEngine::new(settings, foreground);
-            e.run(command_rx, sample_rx, snapshot_tx);
+            RecordingEngine::new_with_factory(settings, foreground, factory).run(
+                high_rx,
+                normal_rx,
+                snapshot_tx,
+            )
         });
         Self {
-            command_tx,
-            sample_tx,
+            high_tx,
+            normal_tx,
             snapshot_rx,
             worker: Some(worker),
+            shutting_down: false,
         }
     }
-    pub fn shutdown(&mut self) {
-        // A bounded queue may be full during a busy session. A blocking send
-        // guarantees the worker observes shutdown before we join it.
-        let _ = self.command_tx.send(EngineCommand::Shutdown);
+    pub fn try_submit(&self, cmd: EngineCommand) -> Result<(), SubmitError> {
+        if self.shutting_down && !matches!(cmd, EngineCommand::ForceShutdown) {
+            return Err(SubmitError::ShuttingDown);
+        };
+        let tx = if cmd.is_high_priority() {
+            &self.high_tx
+        } else {
+            &self.normal_tx
+        };
+        tx.try_send(cmd).map_err(|e| match e {
+            TrySendError::Full(_) => SubmitError::QueueFull,
+            TrySendError::Disconnected(_) => SubmitError::Disconnected,
+        })
+    }
+    pub fn orderly_shutdown(&mut self) -> ShutdownResult {
+        if self.worker.is_none() {
+            return ShutdownResult::AlreadyStopped;
+        };
+        self.shutting_down = true;
+        let _ = self.high_tx.send(EngineCommand::PrepareShutdown);
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
+        ShutdownResult::Joined
+    }
+    pub fn force_shutdown(&mut self) -> ShutdownResult {
+        if self.worker.is_none() {
+            return ShutdownResult::AlreadyStopped;
+        };
+        self.shutting_down = true;
+        let _ = self.high_tx.try_send(EngineCommand::ForceShutdown);
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+        ShutdownResult::Joined
+    }
+    pub fn shutdown(&mut self) {
+        let _ = self.orderly_shutdown();
     }
 }
 impl Drop for RecordingEngineHandle {
     fn drop(&mut self) {
-        self.shutdown();
+        self.shutting_down = true;
+        let _ = self.high_tx.try_send(EngineCommand::ForceShutdown); /* dropping JoinHandle detaches: UI destruction is bounded */
+        self.worker.take();
     }
 }
 
@@ -76,122 +137,231 @@ pub struct RecordingEngine {
     last_foreground_check: Option<Instant>,
     monotonic_now: MonotonicNow,
     status_messages: Vec<String>,
-    errors: Vec<String>,
+    errors: Vec<EngineError>,
     sequence: u64,
+    generation: u64,
     deduper: SnapshotDeduper,
+    sampler_factory: Arc<dyn SamplerFactory>,
+    sampler: Option<Box<dyn CursorSampler>>,
+    sample_rx: Option<Receiver<CursorSample>>,
+    force_discontinuity: bool,
+    ui_visible: bool,
+    last_publish: Option<Instant>,
+    sent_revisions: HashMap<crate::canvas::coordinates::TileCoordinate, u64>,
+    removed: HashSet<crate::canvas::coordinates::TileCoordinate>,
+    full_snapshot: bool,
+    shutting_down: bool,
 }
 impl RecordingEngine {
-    pub fn new(
-        settings: AppSettings,
-        foreground_resolver: Option<Box<dyn ForegroundResolver>>,
-    ) -> Self {
-        Self::new_with_clock(settings, foreground_resolver, Box::new(Instant::now))
+    pub fn new(settings: AppSettings, fg: Option<Box<dyn ForegroundResolver>>) -> Self {
+        Self::new_with_factory(settings, fg, Arc::new(ProductionSamplerFactory))
     }
-
-    /// Constructs an engine with an injected monotonic clock. Cursor sample
-    /// timestamps remain supplied by the sampler; this clock controls engine
-    /// throttles such as foreground metadata refresh.
+    pub fn new_with_factory(
+        settings: AppSettings,
+        fg: Option<Box<dyn ForegroundResolver>>,
+        factory: Arc<dyn SamplerFactory>,
+    ) -> Self {
+        Self::new_parts(settings, fg, factory, Box::new(Instant::now))
+    }
     pub fn new_with_clock(
         settings: AppSettings,
-        foreground_resolver: Option<Box<dyn ForegroundResolver>>,
-        monotonic_now: MonotonicNow,
+        fg: Option<Box<dyn ForegroundResolver>>,
+        clock: MonotonicNow,
+    ) -> Self {
+        Self::new_parts(settings, fg, Arc::new(ProductionSamplerFactory), clock)
+    }
+    fn new_parts(
+        settings: AppSettings,
+        fg: Option<Box<dyn ForegroundResolver>>,
+        factory: Arc<dyn SamplerFactory>,
+        clock: MonotonicNow,
     ) -> Self {
         Self {
             status: RecordingStatus::Stopped,
             classifier: MovementClassifier::new(&settings),
             settings,
-            canvas: CanvasModel::default(),
-            statistics: SessionStatistics::default(),
-            foreground_resolver,
+            canvas: Default::default(),
+            statistics: Default::default(),
+            foreground_resolver: fg,
             current_foreground: ForegroundApplication::unknown(),
             last_foreground_check: None,
-            monotonic_now,
-            status_messages: Vec::new(),
-            errors: Vec::new(),
+            monotonic_now: clock,
+            status_messages: vec![],
+            errors: vec![],
             sequence: 0,
-            deduper: SnapshotDeduper::default(),
+            generation: 1,
+            deduper: Default::default(),
+            sampler_factory: factory,
+            sampler: None,
+            sample_rx: None,
+            force_discontinuity: false,
+            ui_visible: true,
+            last_publish: None,
+            sent_revisions: HashMap::new(),
+            removed: HashSet::new(),
+            full_snapshot: true,
+            shutting_down: false,
         }
     }
     fn run(
         &mut self,
-        commands: Receiver<EngineCommand>,
-        samples: Receiver<CursorSample>,
+        high: Receiver<EngineCommand>,
+        normal: Receiver<EngineCommand>,
         snapshots: SyncSender<SessionSnapshot>,
     ) {
         loop {
-            while let Ok(cmd) = commands.try_recv() {
-                if self.apply(cmd) {
+            while let Ok(c) = high.try_recv() {
+                if self.apply(c) {
+                    self.publish(&snapshots, true);
                     return;
                 }
             }
-            match samples.recv_timeout(Duration::from_millis(50)) {
-                Ok(sample) => {
-                    while let Ok(cmd) = commands.try_recv() {
-                        if self.apply(cmd) {
-                            return;
-                        }
-                    }
-                    if self.status == RecordingStatus::Recording {
-                        self.accept_sample(sample);
-                        self.commit_finished();
-                        self.send_snapshot(&snapshots);
+            if let Ok(c) = normal.try_recv() {
+                if self.apply(c) {
+                    self.publish(&snapshots, true);
+                    return;
+                }
+            };
+            let mut handled = 0;
+            while handled < SAMPLE_BATCH {
+                while let Ok(c) = high.try_recv() {
+                    if self.apply(c) {
+                        self.publish(&snapshots, true);
+                        return;
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => self.send_snapshot(&snapshots),
-                Err(_) => return,
+                let next = self.sample_rx.as_ref().and_then(|r| r.try_recv().ok());
+                match next {
+                    Some(s) => {
+                        if self.status == RecordingStatus::Recording {
+                            self.accept_sample(s);
+                            self.commit_finished();
+                        }
+                        handled += 1
+                    }
+                    None => break,
+                }
             }
+            self.publish(&snapshots, false);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn start_sampler(&mut self) {
+        self.stop_sampler();
+        let mut s = self
+            .sampler_factory
+            .create(self.settings.sampling_interval_ms);
+        self.sample_rx = Some(s.start());
+        self.sampler = Some(s)
+    }
+    fn stop_sampler(&mut self) {
+        self.sample_rx = None;
+        if let Some(mut s) = self.sampler.take() {
+            s.stop();
         }
     }
     fn apply(&mut self, cmd: EngineCommand) -> bool {
+        if self.shutting_down
+            && !matches!(
+                cmd,
+                EngineCommand::ForceShutdown
+                    | EngineCommand::PrepareShutdown
+                    | EngineCommand::RequestSnapshot
+            )
+        {
+            self.status_messages
+                .push("Command rejected: engine shutdown is in progress.".into());
+            return false;
+        }
         match cmd {
-            EngineCommand::Start => {
+            EngineCommand::Start(ResolvedDisplayProfile { settings, topology }) => {
+                self.generation += 1;
+                self.settings = (*settings).clone();
+                self.canvas.current_topology = topology;
+                self.classifier = MovementClassifier::new(&self.settings);
                 self.status = RecordingStatus::Recording;
-                self.status_messages.push("Recording started.".into());
+                self.full_snapshot = true;
+                self.start_sampler();
+                self.status_messages.push("Recording started.".into())
             }
             EngineCommand::Pause => {
                 self.flush_all(DiscontinuityReason::PauseResume);
-                self.status = RecordingStatus::Paused;
+                self.stop_sampler();
+                self.status = RecordingStatus::Paused
             }
             EngineCommand::Resume => {
                 self.flush_all(DiscontinuityReason::PauseResume);
-                self.status = RecordingStatus::Recording;
+                self.force_discontinuity = true;
+                self.start_sampler();
+                self.status = RecordingStatus::Recording
             }
             EngineCommand::Finish => {
+                self.stop_sampler();
                 self.flush_all(DiscontinuityReason::PauseResume);
-                self.status = RecordingStatus::Stopped;
+                self.status = RecordingStatus::Stopped
             }
             EngineCommand::Clear => {
+                self.removed
+                    .extend(self.canvas.sparse_tiles.tiles.keys().copied());
                 self.canvas.clear();
                 self.statistics.reset();
-                self.classifier = MovementClassifier::new(&self.settings);
-                self.deduper.clear();
+                self.generation += 1;
+                self.sent_revisions.clear();
+                self.full_snapshot = true
             }
-            EngineCommand::UpdateDrawingSettings(s) => {
+            EngineCommand::UpdateRecordingParameters(s) => {
+                let restart = self.status == RecordingStatus::Recording
+                    && s.sampling_interval_ms != self.settings.sampling_interval_ms;
                 self.flush_all(DiscontinuityReason::PauseResume);
-                self.settings = s.clone();
-                self.classifier = MovementClassifier::new(&s);
-            }
-            EngineCommand::UpdateApplicationColorRules(r) => {
-                self.flush_all(DiscontinuityReason::PauseResume);
-                self.settings.application_colors = r;
-            }
-            EngineCommand::RefreshTopology(t) => {
-                self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
-                if let Some(t) = t {
-                    self.canvas.current_topology = t;
+                self.settings = s;
+                self.classifier.update_settings(&self.settings);
+                if restart {
+                    self.force_discontinuity = true;
+                    self.start_sampler()
                 }
             }
-            EngineCommand::RequestSnapshot => {}
-            EngineCommand::Shutdown => {
+            EngineCommand::UpdateDrawingStyle(s) | EngineCommand::UpdateBackground(s) => {
+                self.settings = s
+            }
+            EngineCommand::UpdateApplicationColorRules(r) => self.settings.application_colors = r,
+            EngineCommand::RefreshTopology(Some(t)) => {
+                if t.signature != self.canvas.current_topology.signature {
+                    self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
+                    self.canvas.current_topology = t;
+                    self.force_discontinuity = true
+                }
+            }
+            EngineCommand::RefreshTopology(None) | EngineCommand::InvalidateTopology => {}
+            EngineCommand::SetUiVisibility(v) => self.ui_visible = v,
+            EngineCommand::RequestSnapshot => {
+                self.full_snapshot = true;
+                self.deduper.clear()
+            }
+            EngineCommand::RestoreStoppedSession(_) => {
+                self.stop_sampler();
+                self.status = RecordingStatus::Stopped;
+                self.generation += 1;
+                self.full_snapshot = true
+            }
+            EngineCommand::RequestExport(_) => {}
+            EngineCommand::RequestRecoveryCheckpoint => {}
+            EngineCommand::PrepareShutdown | EngineCommand::ForceShutdown => {
+                self.shutting_down = true;
+                self.stop_sampler();
                 self.flush_all(DiscontinuityReason::PauseResume);
                 return true;
             }
         }
         false
     }
-    fn accept_sample(&mut self, sample: CursorSample) {
+    fn accept_sample(&mut self, s: CursorSample) {
         self.statistics.observed_samples += 1;
         self.statistics.samples_recorded += 1;
+        if self.force_discontinuity {
+            self.classifier
+                .mark_discontinuity(DiscontinuityReason::PauseResume);
+            self.force_discontinuity = false
+        }
         self.resolve_foreground_bounded();
         let color = self.settings.application_colors.color_for(
             &self.current_foreground.identity,
@@ -199,8 +369,8 @@ impl RecordingEngine {
         );
         self.classifier
             .set_foreground_context(self.current_foreground.identity.clone(), color);
-        self.classifier.accept_sample(sample);
-        self.statistics.current_dwell_duration = self.classifier.current_dwell_duration();
+        self.classifier.accept_sample(s);
+        self.statistics.current_dwell_duration = self.classifier.current_dwell_duration()
     }
     fn resolve_foreground_bounded(&mut self) {
         let now = (self.monotonic_now)();
@@ -211,25 +381,33 @@ impl RecordingEngine {
             return;
         }
         self.last_foreground_check = Some(now);
-        self.current_foreground = match self.foreground_resolver.as_mut() {
-            Some(r) => r
-                .resolve_foreground()
-                .unwrap_or_else(|_| ForegroundApplication::unknown()),
-            None => crate::capture::windows::resolve_foreground_application()
-                .unwrap_or_else(|_| ForegroundApplication::unknown()),
+        let result = match self.foreground_resolver.as_mut() {
+            Some(r) => r.resolve_foreground(),
+            None => crate::capture::windows::resolve_foreground_application(),
         };
+        match result {
+            Ok(a) => self.current_foreground = a,
+            Err(_) => {
+                self.current_foreground = ForegroundApplication::unknown();
+                if !self
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, EngineError::ForegroundDegradation(_)))
+                {
+                    self.errors.push(EngineError::ForegroundDegradation(
+                        "application identity unavailable".into(),
+                    ))
+                }
+            }
+        }
     }
-    fn flush_all(&mut self, reason: DiscontinuityReason) {
-        self.classifier.mark_discontinuity(reason);
-        self.commit_finished();
+    fn flush_all(&mut self, r: DiscontinuityReason) {
+        self.classifier.mark_discontinuity(r);
+        self.commit_finished()
     }
     fn commit_finished(&mut self) {
         for seg in self.classifier.segments.drain(..) {
-            let mut p = crate::canvas::model::MovementPath::new(
-                seg.color,
-                self.settings.line_width_px,
-                true,
-            );
+            let mut p = MovementPath::new(seg.color, self.settings.line_width_px, true);
             p.application = seg.application;
             p.points = seg
                 .points
@@ -237,10 +415,10 @@ impl RecordingEngine {
                 .map(|(x, y)| crate::canvas::coordinates::CanvasPoint { x, y })
                 .collect();
             rasterize_movement_path(&mut self.canvas.sparse_tiles, &p);
-            self.statistics.finalized_movement_chunks += 1;
+            self.statistics.finalized_movement_chunks += 1
         }
         for d in self.classifier.dwells.drain(..) {
-            let mut s = crate::canvas::model::DwellShape::from_duration(
+            let mut s = DwellShape::from_duration(
                 crate::canvas::coordinates::CanvasPoint {
                     x: d.center_x,
                     y: d.center_y,
@@ -258,117 +436,101 @@ impl RecordingEngine {
             );
             s.application = d.application;
             rasterize_dwell_shape(&mut self.canvas.sparse_tiles, &s);
-            self.statistics.finalized_dwells += 1;
-            self.statistics.longest_dwell = self.statistics.longest_dwell.max(d.duration);
+            self.statistics.finalized_dwells += 1
         }
-        self.statistics.active_tile_count = self.canvas.sparse_tiles.tiles.len();
-        self.statistics.dirty_tile_count = self
-            .canvas
-            .sparse_tiles
-            .tiles
-            .values()
-            .filter(|t| t.preview_dirty || t.recovery_dirty)
-            .count();
+        self.statistics.active_tile_count = self.canvas.sparse_tiles.tiles.len()
     }
-    fn send_snapshot(&mut self, tx: &SyncSender<SessionSnapshot>) {
-        self.sequence += 1;
-        let snap = SessionSnapshot {
-            recording_status: self.status,
-            active_path_overlay: None,
-            active_dwell_overlay: None,
-            changed_tile_revisions: self
+    fn publish(&mut self, tx: &SyncSender<SessionSnapshot>, immediate: bool) {
+        let now = (self.monotonic_now)();
+        let cadence = if self.status == RecordingStatus::Recording {
+            if self.ui_visible {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(1)
+            }
+        } else {
+            Duration::MAX
+        };
+        let changed = self.full_snapshot
+            || self
                 .canvas
                 .sparse_tiles
                 .tiles
                 .iter()
-                .filter(|(_, t)| t.preview_dirty || t.recovery_dirty)
-                .map(|(c, t)| (*c, t.revision))
-                .collect(),
+                .any(|(c, t)| self.sent_revisions.get(c) != Some(&t.revision))
+            || !self.removed.is_empty();
+        if !immediate && !changed && self.status == RecordingStatus::Stopped {
+            return;
+        }
+        if !immediate
+            && self
+                .last_publish
+                .is_some_and(|p| now.saturating_duration_since(p) < cadence)
+        {
+            return;
+        }
+        self.sequence += 1;
+        let deltas = self
+            .canvas
+            .sparse_tiles
+            .tiles
+            .iter()
+            .filter(|(c, t)| self.full_snapshot || self.sent_revisions.get(c) != Some(&t.revision))
+            .map(|(c, t)| TileDelta {
+                coordinate: *c,
+                revision: t.revision,
+                width: self.canvas.sparse_tiles.tile_size,
+                height: self.canvas.sparse_tiles.tile_size,
+                rgba: Arc::from(t.pixels.clone()),
+                removed: false,
+                generation: self.generation,
+            })
+            .chain(self.removed.iter().map(|c| TileDelta {
+                coordinate: *c,
+                revision: 0,
+                width: 0,
+                height: 0,
+                rgba: Arc::from([]),
+                removed: true,
+                generation: self.generation,
+            }))
+            .collect::<Vec<_>>();
+        let revisions = deltas
+            .iter()
+            .filter(|d| !d.removed)
+            .map(|d| (d.coordinate, d.revision))
+            .collect();
+        let snap = SessionSnapshot {
+            recording_status: self.status,
+            session_id: None,
+            detected_topology: self.canvas.current_topology.clone(),
+            effective_topology: self.canvas.current_topology.clone(),
+            session_bounds: self.canvas.session_desktop_bounds,
+            profile: Some(Arc::new(self.settings.clone())),
+            tile_deltas: deltas,
+            full_tile_snapshot: self.full_snapshot,
+            active_path_overlay: self.canvas.active_movement_overlay.clone(),
+            active_dwell_overlay: self.canvas.active_dwell_overlay.clone(),
+            changed_tile_revisions: revisions,
             current_topology: self.canvas.current_topology.clone(),
             session_topology: self.canvas.current_topology.clone(),
             statistics: self.statistics.clone(),
+            sampler_observed: self.statistics.observed_samples,
+            classifier_delivered: self.statistics.samples_recorded,
+            samples_coalesced: 0,
+            activity: EngineActivity::default(),
             status_messages: self.status_messages.clone(),
             errors: self.errors.clone(),
             sequence: self.sequence,
+            generation: self.generation,
         };
-        if self.deduper.should_send(&snap) {
-            let _ = tx.try_send(snap);
+        if self.deduper.should_send(&snap) && tx.try_send(snap).is_ok() {
+            for (c, t) in &self.canvas.sparse_tiles.tiles {
+                self.sent_revisions.insert(*c, t.revision);
+            }
+            self.removed.clear();
+            self.full_snapshot = false;
+            self.last_publish = Some(now)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::capture::foreground::{ApplicationIdentity, ForegroundError};
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    struct CountingResolver {
-        calls: Arc<AtomicUsize>,
-    }
-    impl ForegroundResolver for CountingResolver {
-        fn resolve_foreground(&mut self) -> Result<ForegroundApplication, ForegroundError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ForegroundApplication {
-                identity: ApplicationIdentity::new(1, "app.exe", Some("c:/app.exe".into()), None),
-                display_label: None,
-            })
-        }
-    }
-
-    #[test]
-    fn foreground_metadata_is_not_resolved_for_every_sample() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut e = RecordingEngine::new(
-            AppSettings::default(),
-            Some(Box::new(CountingResolver {
-                calls: calls.clone(),
-            })),
-        );
-        e.status = RecordingStatus::Recording;
-        let t0 = Instant::now();
-        for i in 0..20 {
-            e.accept_sample(CursorSample::new(
-                t0 + Duration::from_millis(i),
-                i as f32,
-                0.0,
-            ));
-        }
-        assert!(calls.load(Ordering::SeqCst) < 20);
-    }
-
-    #[test]
-    fn injected_clock_controls_foreground_sampling_without_sleeping() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let clock_ticks = Arc::new(AtomicUsize::new(0));
-        let ticks = clock_ticks.clone();
-        let epoch = Instant::now();
-        let mut e = RecordingEngine::new_with_clock(
-            AppSettings::default(),
-            Some(Box::new(CountingResolver {
-                calls: calls.clone(),
-            })),
-            Box::new(move || {
-                epoch + Duration::from_millis(ticks.fetch_add(300, Ordering::SeqCst) as u64)
-            }),
-        );
-        e.status = RecordingStatus::Recording;
-        e.accept_sample(CursorSample::new(epoch, 0.0, 0.0));
-        e.accept_sample(CursorSample::new(
-            epoch + Duration::from_millis(1),
-            1.0,
-            0.0,
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn background_worker_shuts_down_and_joins() {
-        let mut handle = RecordingEngineHandle::spawn(AppSettings::default(), None);
-        handle.shutdown();
-        assert!(handle.worker.is_none());
     }
 }

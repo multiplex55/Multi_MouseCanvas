@@ -2,19 +2,34 @@ use crate::{
     app_colors::registry::ApplicationColorRegistry, canvas::topology::DisplayTopology,
     settings::model::AppSettings,
 };
+use std::{path::PathBuf, sync::Arc};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedDisplayProfile {
+    pub settings: Arc<AppSettings>,
+    pub topology: DisplayTopology,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
-    Start,
+    Start(ResolvedDisplayProfile),
     Pause,
     Resume,
     Finish,
     Clear,
-    UpdateDrawingSettings(AppSettings),
+    RestoreStoppedSession(PathBuf),
+    UpdateRecordingParameters(AppSettings),
+    UpdateDrawingStyle(AppSettings),
     UpdateApplicationColorRules(ApplicationColorRegistry),
     RefreshTopology(Option<DisplayTopology>),
+    InvalidateTopology,
+    UpdateBackground(AppSettings),
+    SetUiVisibility(bool),
+    RequestExport(PathBuf),
+    RequestRecoveryCheckpoint,
     RequestSnapshot,
-    Shutdown,
+    PrepareShutdown,
+    ForceShutdown,
 }
 
 impl EngineCommand {
@@ -23,12 +38,20 @@ impl EngineCommand {
             Self::Pause
             | Self::Finish
             | Self::Clear
-            | Self::Shutdown
+            | Self::PrepareShutdown
+            | Self::ForceShutdown
+            | Self::RequestRecoveryCheckpoint
+            | Self::InvalidateTopology
             | Self::RefreshTopology(_) => CommandPriority::High,
-            Self::Start
+            Self::Start(_)
             | Self::Resume
-            | Self::UpdateDrawingSettings(_)
+            | Self::RestoreStoppedSession(_)
+            | Self::UpdateRecordingParameters(_)
+            | Self::UpdateDrawingStyle(_)
             | Self::UpdateApplicationColorRules(_)
+            | Self::UpdateBackground(_)
+            | Self::SetUiVisibility(_)
+            | Self::RequestExport(_)
             | Self::RequestSnapshot => CommandPriority::Normal,
         }
     }

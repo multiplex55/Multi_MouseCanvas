@@ -51,7 +51,6 @@ impl eframe::App for MultiMouseCanvasApp {
             }
             self.state.apply_command(command);
         }
-        self.state.drain_samples();
         self.state.flush_settings_save_if_due();
         if ctx.input(|i| i.viewport().close_requested()) {
             match resolve_close_window_action(
