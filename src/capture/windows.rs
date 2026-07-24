@@ -64,9 +64,8 @@ fn global_cursor_position() -> Option<(i32, i32)> {
     use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
     let mut point = POINT::default();
     unsafe {
-        GetCursorPos(&mut point)
-            .as_bool()
-            .then_some((point.x, point.y))
+        GetCursorPos(&mut point).ok()?;
+        Some((point.x, point.y))
     }
 }
 
@@ -78,6 +77,7 @@ fn global_cursor_position() -> Option<(i32, i32)> {
 #[cfg(windows)]
 pub fn resolve_foreground_application(
 ) -> Result<super::foreground::ForegroundApplication, super::foreground::ForegroundError> {
+    use super::foreground::ForegroundResolver;
     windows_foreground::cached_resolver().resolve_foreground()
 }
 
@@ -96,21 +96,15 @@ mod windows_foreground {
         collections::HashMap,
         sync::{Mutex, OnceLock},
     };
-    use windows::{
-        core::PWSTR,
-        Win32::{
-            Foundation::{CloseHandle, HWND},
-            System::{
-                ProcessStatus::K32GetModuleFileNameExW,
-                Threading::{
-                    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-                    PROCESS_VM_READ,
-                },
-            },
-            UI::WindowsAndMessaging::{
-                GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    use windows::Win32::{
+        Foundation::{CloseHandle, HWND},
+        System::{
+            ProcessStatus::K32GetModuleFileNameExW,
+            Threading::{
+                GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
             },
         },
+        UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId},
     };
 
     #[derive(Clone)]
@@ -137,7 +131,7 @@ mod windows_foreground {
     impl ForegroundResolver for WindowsForegroundResolver {
         fn resolve_foreground(&mut self) -> Result<ForegroundApplication, ForegroundError> {
             let hwnd = unsafe { GetForegroundWindow() };
-            if hwnd.0 == 0 {
+            if hwnd.0.is_null() {
                 return Ok(ForegroundApplication::unknown());
             }
             let pid = window_pid(hwnd)
@@ -218,9 +212,7 @@ mod windows_foreground {
         let _ =
             unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
         let mut buf = [0u16; 32768];
-        let len = unsafe {
-            K32GetModuleFileNameExW(handle, None, PWSTR(buf.as_mut_ptr()), buf.len() as u32)
-        };
+        let len = unsafe { K32GetModuleFileNameExW(handle, None, &mut buf) };
         unsafe {
             let _ = CloseHandle(handle);
         }

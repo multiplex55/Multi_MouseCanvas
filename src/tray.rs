@@ -35,14 +35,15 @@ mod imp {
             for (id, title, _) in items {
                 let _ = menu.append(&MenuItem::with_id(id, title, true, None));
             }
-            let icon = Icon::from_rgba(vec![0, 120, 215, 255; 16 * 16], 16, 16).ok()?;
+            let rgba = [0_u8, 120, 215, 255].repeat(16 * 16);
+            let icon = Icon::from_rgba(rgba, 16, 16).ok()?;
             let tray = TrayIconBuilder::new()
                 .with_tooltip("MultiMouseCanvas")
                 .with_menu(Box::new(menu))
                 .with_icon(icon)
                 .build()
                 .ok()?;
-            MenuEvent::set_event_handler(Some(move |event| {
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let command = match event.id().as_ref() {
                     "show" => AppCommand::Show,
                     "start" => AppCommand::StartRecording,
