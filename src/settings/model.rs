@@ -1,4 +1,4 @@
-use crate::app_colors::registry::ApplicationColorRegistry;
+use crate::{app::commands::CloseWindowBehavior, app_colors::registry::ApplicationColorRegistry};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -95,6 +95,8 @@ pub struct AppSettings {
     pub transparent_canvas_mode: bool,
     #[serde(default = "default_movement_smoothing_enabled")]
     pub movement_smoothing_enabled: Option<bool>,
+    #[serde(default)]
+    pub close_window_behavior: CloseWindowBehavior,
 }
 
 impl Default for AppSettings {
@@ -120,6 +122,7 @@ impl Default for AppSettings {
             dwell_render_mode: DwellRenderMode::FillAndOutline,
             transparent_canvas_mode: false,
             movement_smoothing_enabled: Some(true),
+            close_window_behavior: CloseWindowBehavior::default(),
         }
     }
 }
@@ -156,6 +159,10 @@ mod tests {
         assert_eq!(settings.dwell_render_mode, DwellRenderMode::FillAndOutline);
         assert!(!settings.transparent_canvas_mode);
         assert_eq!(settings.movement_smoothing_enabled, Some(true));
+        assert_eq!(
+            settings.close_window_behavior,
+            CloseWindowBehavior::MinimizeToTrayWhileRecording
+        );
     }
 
     #[test]
@@ -182,5 +189,9 @@ mod tests {
         assert_eq!(settings.min_dwell_shape_size, 12.0);
         assert_eq!(settings.max_dwell_shape_size, 96.0);
         assert_eq!(settings.movement_smoothing_enabled, Some(true));
+        assert_eq!(
+            settings.close_window_behavior,
+            CloseWindowBehavior::MinimizeToTrayWhileRecording
+        );
     }
 }

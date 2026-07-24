@@ -1,26 +1,73 @@
 pub mod commands;
 pub mod state;
 
+use crate::app::commands::{resolve_close_window_action, AppCommand, CloseWindowAction};
 use crate::session::model::RecordingStatus;
 use crate::{app_colors::registry::ApplicationColorMode, canvas::renderer};
 use eframe::egui;
 use state::AppState;
+use std::sync::mpsc::{self, Receiver};
 
 pub struct MultiMouseCanvasApp {
     state: AppState,
+    command_rx: Receiver<AppCommand>,
+    _tray: Option<crate::tray::AppTray>,
+    confirm_exit: bool,
 }
 
 impl MultiMouseCanvasApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        _cc: &eframe::CreationContext<'_>,
+        listener: Option<std::net::TcpListener>,
+        initial_commands: Vec<AppCommand>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        if let Some(listener) = listener {
+            crate::ipc::serve(listener, tx.clone());
+        }
+        let tray = crate::tray::AppTray::new(tx);
+        let mut state = AppState::load();
+        for command in initial_commands {
+            state.apply_command(command);
+        }
         Self {
-            state: AppState::load(),
+            state,
+            command_rx: rx,
+            _tray: tray,
+            confirm_exit: false,
         }
     }
 }
 
 impl eframe::App for MultiMouseCanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(command) = self.command_rx.try_recv() {
+            if command == AppCommand::Show {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+            self.state.apply_command(command);
+        }
         self.state.drain_samples();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            match resolve_close_window_action(
+                self.state.settings.close_window_behavior,
+                self.state.recording_status,
+            ) {
+                CloseWindowAction::HideToTray => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    self.state.status_message = Some("Recording continues in the tray.".to_owned());
+                }
+                CloseWindowAction::AskForExitConfirmation => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    self.confirm_exit = true;
+                }
+                CloseWindowAction::Exit => self.state.exit_requested = true,
+            }
+        }
+        if self.state.exit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("MultiMouseCanvas");
             ui.label("Windows-first multi-mouse canvas recorder");
@@ -44,7 +91,7 @@ impl eframe::App for MultiMouseCanvasApp {
                     )
                     .clicked()
                 {
-                    self.state.request_start_recording();
+                    self.state.apply_command(AppCommand::StartRecording);
                 }
 
                 let pause_label = match self.state.recording_status {
@@ -58,7 +105,7 @@ impl eframe::App for MultiMouseCanvasApp {
                     )
                     .clicked()
                 {
-                    self.state.toggle_pause_resume();
+                    self.state.apply_command(AppCommand::TogglePauseResume);
                 }
 
                 if ui
@@ -68,7 +115,7 @@ impl eframe::App for MultiMouseCanvasApp {
                     )
                     .clicked()
                 {
-                    self.state.finish_session();
+                    self.state.apply_command(AppCommand::FinishSession);
                 }
 
                 if ui.button("Clear canvas").clicked() {
@@ -82,7 +129,7 @@ impl eframe::App for MultiMouseCanvasApp {
                     )
                     .clicked()
                 {
-                    self.state.export_canvas_to_default();
+                    self.state.apply_command(AppCommand::ExportCurrentCanvas);
                 }
             });
 
@@ -132,6 +179,26 @@ impl eframe::App for MultiMouseCanvasApp {
                     "Export directory: {}",
                     self.state.settings.export_directory.display()
                 ));
+                ui.separator();
+                egui::ComboBox::from_label("Close window behavior")
+                    .selected_text(format!("{:?}", self.state.settings.close_window_behavior))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.state.settings.close_window_behavior,
+                            crate::app::commands::CloseWindowBehavior::MinimizeToTrayWhileRecording,
+                            "Minimize to tray while recording",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.settings.close_window_behavior,
+                            crate::app::commands::CloseWindowBehavior::ExitAfterConfirmation,
+                            "Exit after confirmation",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.settings.close_window_behavior,
+                            crate::app::commands::CloseWindowBehavior::AlwaysExit,
+                            "Always exit",
+                        );
+                    });
                 ui.separator();
                 ui.label("Application colors");
                 egui::ComboBox::from_label("Color mode")
@@ -226,6 +293,23 @@ impl eframe::App for MultiMouseCanvasApp {
                         }
                     });
             });
+
+            if self.confirm_exit {
+                egui::Window::new("Exit MultiMouseCanvas?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label("Exit and stop any background recording/sampling?");
+                        ui.horizontal(|ui| {
+                            if ui.button("Exit").clicked() {
+                                self.state.exit_requested = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.confirm_exit = false;
+                            }
+                        });
+                    });
+            }
 
             ui.separator();
             ui.heading("Canvas preview");
