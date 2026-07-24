@@ -31,10 +31,7 @@ fn platform_set_process_dpi_awareness() {}
 fn platform_current_topology() -> Result<DisplayTopology, DisplayError> {
     use windows::Win32::{
         Foundation::{BOOL, LPARAM, RECT},
-        Graphics::Gdi::{
-            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
-            MONITORINFOF_PRIMARY,
-        },
+        Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW},
     };
     unsafe extern "system" fn enum_proc(
         monitor: HMONITOR,
@@ -52,7 +49,7 @@ fn platform_current_topology() -> Result<DisplayTopology, DisplayError> {
             let name = String::from_utf16_lossy(&info.szDevice)
                 .trim_matches(char::from(0))
                 .to_owned();
-            let primary = (info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY.0) != 0;
+            let primary = (info.monitorInfo.dwFlags & 1) != 0;
             let mut m = Monitor::new(
                 if name.is_empty() {
                     format!("HMONITOR{:?}", monitor.0)

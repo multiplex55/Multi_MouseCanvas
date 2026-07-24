@@ -31,7 +31,7 @@ pub fn render_preview(ui: &mut Ui, canvas: &CanvasModel) {
     } else {
         painter.rect_filled(rect, 6.0, color32(&canvas.background.color));
     }
-    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::DARK_GRAY));
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, Color32::DARK_GRAY));
 
     if let Some(path) = &canvas.active_movement_overlay {
         draw_path(&painter, rect, transform.scale, path);
