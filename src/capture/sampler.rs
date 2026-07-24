@@ -1,5 +1,5 @@
 use std::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender, SyncSender},
     time::{Duration, Instant},
 };
 
@@ -29,6 +29,20 @@ pub enum SamplerCommand {
     Stop,
 }
 
+pub const SAMPLE_CHANNEL_BOUND: usize = 256;
+
+pub fn bounded_sample_channel() -> (SyncSender<CursorSample>, Receiver<CursorSample>) {
+    mpsc::sync_channel(SAMPLE_CHANNEL_BOUND)
+}
+
+pub fn try_send_coalesced(tx: &SyncSender<CursorSample>, sample: CursorSample) -> bool {
+    match tx.try_send(sample) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => false,
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
 pub trait CursorSampler: Send {
     fn start(&mut self) -> Receiver<CursorSample>;
     fn stop(&mut self);
@@ -51,14 +65,14 @@ impl FakeCursorSampler {
 
 impl CursorSampler for FakeCursorSampler {
     fn start(&mut self) -> Receiver<CursorSample> {
-        let (sample_tx, sample_rx) = mpsc::channel();
+        let (sample_tx, sample_rx) = bounded_sample_channel();
         let (command_tx, command_rx) = mpsc::channel();
         self.command_tx = Some(command_tx);
         for sample in self.samples.clone() {
             if command_rx.try_recv().is_ok() {
                 break;
             }
-            let _ = sample_tx.send(sample);
+            let _ = try_send_coalesced(&sample_tx, sample);
         }
         sample_rx
     }
@@ -87,5 +101,22 @@ mod tests {
         assert_eq!(sample.physical_x, 1.0);
         assert_eq!(sample.physical_y, 2.0);
         sampler.stop();
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    #[test]
+    fn bounded_sample_channel_does_not_grow_unbounded() {
+        let (tx, _rx) = bounded_sample_channel();
+        let now = Instant::now();
+        let mut accepted = 0;
+        for i in 0..(SAMPLE_CHANNEL_BOUND + 100) {
+            if try_send_coalesced(&tx, CursorSample::new(now, i as f32, 0.0)) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, SAMPLE_CHANNEL_BOUND);
     }
 }
