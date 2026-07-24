@@ -36,6 +36,58 @@ impl Default for DwellShapeKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewFitBehavior {
+    FitAll,
+    FillAvailable,
+}
+impl Default for PreviewFitBehavior {
+    fn default() -> Self {
+        Self::FitAll
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportFormat {
+    Png,
+}
+impl Default for ExportFormat {
+    fn default() -> Self {
+        Self::Png
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExportBackgroundMode {
+    Solid,
+    Transparent,
+    Canvas,
+}
+impl Default for ExportBackgroundMode {
+    fn default() -> Self {
+        Self::Canvas
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewOptions {
+    #[serde(default = "default_true")]
+    pub monitor_outlines: bool,
+    #[serde(default)]
+    pub monitor_labels: bool,
+    #[serde(default)]
+    pub historical_monitor_regions: bool,
+}
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self {
+            monitor_outlines: true,
+            monitor_labels: false,
+            historical_monitor_regions: false,
+        }
+    }
+}
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DwellRenderMode {
     Fill,
     Outline,
@@ -63,14 +115,30 @@ const fn default_dwell_outline_width() -> f32 {
 const fn default_movement_smoothing_enabled() -> Option<bool> {
     Some(true)
 }
+const fn default_dwell_tolerance_radius_px() -> f32 {
+    10.0
+}
+const fn default_line_opacity() -> f32 {
+    1.0
+}
+const fn default_export_scale() -> f32 {
+    1.0
+}
+const fn default_recovery_interval_ms() -> u64 {
+    60_000
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub sampling_interval_ms: u64,
     pub movement_threshold_px: f32,
     pub dwell_activation_delay_ms: u64,
+    #[serde(default = "default_dwell_tolerance_radius_px")]
+    pub dwell_tolerance_radius_px: f32,
     pub dwell_growth_rate: f32,
     pub line_width_px: f32,
+    #[serde(default = "default_line_opacity")]
+    pub line_opacity: f32,
     pub default_movement_color: RgbaColor,
     pub default_dwell_color: RgbaColor,
     pub background_color: RgbaColor,
@@ -97,6 +165,22 @@ pub struct AppSettings {
     pub movement_smoothing_enabled: Option<bool>,
     #[serde(default)]
     pub close_window_behavior: CloseWindowBehavior,
+    #[serde(default)]
+    pub preview_options: PreviewOptions,
+    #[serde(default)]
+    pub preview_fit_behavior: PreviewFitBehavior,
+    #[serde(default)]
+    pub export_format: ExportFormat,
+    #[serde(default = "default_export_scale")]
+    pub export_scale: f32,
+    #[serde(default)]
+    pub export_background_mode: ExportBackgroundMode,
+    #[serde(default)]
+    pub export_monitor_overlays: bool,
+    #[serde(default = "default_recovery_interval_ms")]
+    pub recovery_interval_ms: u64,
+    #[serde(default)]
+    pub show_advanced_performance_settings: bool,
 }
 
 impl Default for AppSettings {
@@ -105,8 +189,10 @@ impl Default for AppSettings {
             sampling_interval_ms: 16,
             movement_threshold_px: 2.0,
             dwell_activation_delay_ms: 600,
+            dwell_tolerance_radius_px: 10.0,
             dwell_growth_rate: 1.25,
             line_width_px: 2.0,
+            line_opacity: 1.0,
             default_movement_color: RgbaColor::new(0, 120, 215, 255),
             default_dwell_color: RgbaColor::new(255, 185, 0, 255),
             background_color: RgbaColor::new(24, 24, 24, 255),
@@ -123,6 +209,14 @@ impl Default for AppSettings {
             transparent_canvas_mode: false,
             movement_smoothing_enabled: Some(true),
             close_window_behavior: CloseWindowBehavior::default(),
+            preview_options: PreviewOptions::default(),
+            preview_fit_behavior: PreviewFitBehavior::default(),
+            export_format: ExportFormat::default(),
+            export_scale: 1.0,
+            export_background_mode: ExportBackgroundMode::default(),
+            export_monitor_overlays: false,
+            recovery_interval_ms: 60_000,
+            show_advanced_performance_settings: false,
         }
     }
 }
@@ -193,5 +287,26 @@ mod tests {
             settings.close_window_behavior,
             CloseWindowBehavior::MinimizeToTrayWhileRecording
         );
+    }
+}
+
+impl AppSettings {
+    pub fn validate(&mut self) {
+        self.sampling_interval_ms = self.sampling_interval_ms.clamp(1, 10_000);
+        self.movement_threshold_px = self.movement_threshold_px.clamp(0.0, 10_000.0);
+        self.dwell_tolerance_radius_px = self.dwell_tolerance_radius_px.clamp(1.0, 10_000.0);
+        self.dwell_activation_delay_ms = self.dwell_activation_delay_ms.min(3_600_000);
+        self.line_width_px = self.line_width_px.clamp(0.1, 1024.0);
+        self.line_opacity = self.line_opacity.clamp(0.0, 1.0);
+        self.min_dwell_shape_size = self.min_dwell_shape_size.clamp(1.0, 10_000.0);
+        self.max_dwell_shape_size = self
+            .max_dwell_shape_size
+            .max(self.min_dwell_shape_size)
+            .min(20_000.0);
+        self.dwell_growth_rate = self.dwell_growth_rate.clamp(0.0, 10_000.0);
+        self.dwell_fill_opacity = self.dwell_fill_opacity.clamp(0.0, 1.0);
+        self.dwell_outline_width = self.dwell_outline_width.clamp(0.0, 1024.0);
+        self.export_scale = self.export_scale.clamp(0.1, 16.0);
+        self.recovery_interval_ms = self.recovery_interval_ms.clamp(1_000, 3_600_000);
     }
 }

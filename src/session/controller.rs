@@ -97,6 +97,16 @@ impl MovementClassifier {
         self.discontinuity_pending = true;
     }
 
+    pub fn update_settings(&mut self, settings: &AppSettings) {
+        self.threshold_px = settings.movement_threshold_px;
+        self.dwell_activation_delay = Duration::from_millis(settings.dwell_activation_delay_ms);
+        self.dwell_growth_rate = settings.dwell_growth_rate;
+        self.min_dwell_size = settings.min_dwell_shape_size;
+        self.max_dwell_size = settings.max_dwell_shape_size;
+        self.large_gap =
+            Duration::from_millis(settings.sampling_interval_ms.saturating_mul(10).max(250));
+    }
+
     pub fn set_foreground_context(&mut self, application: ApplicationIdentity, color: RgbaColor) {
         if self.current_application.stable_key() != application.stable_key() {
             self.finalize_active_segment();

@@ -42,6 +42,10 @@ pub struct AppState {
     last_topology_refresh: Instant,
     pub settings_path: Option<PathBuf>,
     pub exit_requested: bool,
+    pub pending_settings_save: Option<Instant>,
+    pub emitted_settings_commands: Vec<EngineSettingsCommand>,
+    pub lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState,
+    pub performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics,
 }
 
 impl Default for AppState {
@@ -66,6 +70,11 @@ impl Default for AppState {
             last_topology_refresh: Instant::now(),
             settings_path: None,
             exit_requested: false,
+            pending_settings_save: None,
+            emitted_settings_commands: Vec::new(),
+            lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState::default(),
+            performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics::default(
+            ),
         }
     }
 }
@@ -77,7 +86,10 @@ impl AppState {
             Ok(path) => {
                 state.settings_path = Some(path.clone());
                 match storage::load_or_default(&path) {
-                    Ok(settings) => state.settings = settings,
+                    Ok(mut settings) => {
+                        settings.validate();
+                        state.settings = settings;
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "settings load failed; using defaults");
                         state.status_message =
@@ -325,6 +337,53 @@ impl AppState {
         shape
     }
 
+    pub fn schedule_settings_save(&mut self) {
+        self.pending_settings_save = Some(Instant::now() + Duration::from_millis(350));
+    }
+
+    pub fn flush_settings_save_if_due(&mut self) {
+        if self
+            .pending_settings_save
+            .is_some_and(|due| Instant::now() >= due)
+        {
+            self.pending_settings_save = None;
+            self.save_settings_as_status();
+        }
+    }
+
+    pub fn request_clear_canvas_confirmation(&mut self) {
+        self.lifecycle_dialogs
+            .request_clear(!self.canvas.is_empty());
+        if self.canvas.is_empty() {
+            self.confirm_clear_canvas();
+        }
+    }
+    pub fn confirm_clear_canvas(&mut self) {
+        if self.recording_status == RecordingStatus::Recording {
+            self.status_message =
+                Some("Pause or finish recording before clearing the canvas.".to_owned());
+            return;
+        }
+        self.clear_canvas_internal();
+        if let Some(path) = &self.recovery_path {
+            let _ = crate::session::recovery::discard_recovery(path);
+        }
+        self.lifecycle_dialogs.clear_confirmation_open = false;
+        self.status_message =
+            Some("Canvas artwork and recovery cleared; application colors kept.".to_owned());
+    }
+
+    pub fn apply_settings_update(&mut self, update: SettingsUpdate) {
+        update.apply(&mut self.settings);
+        self.settings.validate();
+        self.movement_classifier.update_settings(&self.settings);
+        self.canvas.background.color = self.settings.background_color.clone();
+        self.canvas.background.transparent = self.settings.transparent_canvas_mode;
+        self.emitted_settings_commands
+            .push(update.to_engine_command());
+        self.schedule_settings_save();
+    }
+
     pub fn save_settings_as_status(&mut self) {
         if let Some(path) = &self.settings_path {
             if let Err(error) = storage::save(path, &self.settings) {
@@ -338,5 +397,114 @@ impl AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         self.stop_sampler();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineSettingsCommand {
+    RecordingConfigChanged,
+    VisualConfigChanged,
+    ApplicationColorRuleChanged,
+    ExportConfigChanged,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingsUpdate {
+    SamplingIntervalMs(u64),
+    MovementThresholdPx(f32),
+    DwellToleranceRadiusPx(f32),
+    DwellActivationDelayMs(u64),
+    TransparentCanvasMode(bool),
+    MonitorOutlines(bool),
+    MonitorLabels(bool),
+    PreviewFitBehavior(crate::settings::model::PreviewFitBehavior),
+    LineWidthPx(f32),
+    LineOpacity(f32),
+    DwellShapeKind(crate::settings::model::DwellShapeKind),
+    MinDwellSize(f32),
+    MaxDwellSize(f32),
+    DwellGrowthRate(f32),
+    DwellFillOpacity(f32),
+    DwellOutlineWidth(f32),
+    DwellRenderMode(crate::settings::model::DwellRenderMode),
+    CanvasVisuals,
+    AppColoringEnabled(bool),
+    AppRuleColor(String, crate::settings::model::RgbaColor),
+    AppRuleRename(String, String),
+    AppRuleMerge { survivor: String, merged: String },
+}
+impl SettingsUpdate {
+    fn to_engine_command(&self) -> EngineSettingsCommand {
+        match self {
+            Self::SamplingIntervalMs(_)
+            | Self::MovementThresholdPx(_)
+            | Self::DwellToleranceRadiusPx(_)
+            | Self::DwellActivationDelayMs(_) => EngineSettingsCommand::RecordingConfigChanged,
+            Self::AppColoringEnabled(_)
+            | Self::AppRuleColor(_, _)
+            | Self::AppRuleRename(_, _)
+            | Self::AppRuleMerge { .. } => EngineSettingsCommand::ApplicationColorRuleChanged,
+            Self::CanvasVisuals
+            | Self::TransparentCanvasMode(_)
+            | Self::MonitorOutlines(_)
+            | Self::MonitorLabels(_)
+            | Self::PreviewFitBehavior(_)
+            | Self::LineWidthPx(_)
+            | Self::LineOpacity(_)
+            | Self::DwellShapeKind(_)
+            | Self::MinDwellSize(_)
+            | Self::MaxDwellSize(_)
+            | Self::DwellGrowthRate(_)
+            | Self::DwellFillOpacity(_)
+            | Self::DwellOutlineWidth(_)
+            | Self::DwellRenderMode(_) => EngineSettingsCommand::VisualConfigChanged,
+        }
+    }
+    fn apply(&self, s: &mut crate::settings::model::AppSettings) {
+        match self {
+            Self::SamplingIntervalMs(v) => s.sampling_interval_ms = *v,
+            Self::MovementThresholdPx(v) => s.movement_threshold_px = *v,
+            Self::DwellToleranceRadiusPx(v) => s.dwell_tolerance_radius_px = *v,
+            Self::DwellActivationDelayMs(v) => s.dwell_activation_delay_ms = *v,
+            Self::TransparentCanvasMode(v) => s.transparent_canvas_mode = *v,
+            Self::MonitorOutlines(v) => s.preview_options.monitor_outlines = *v,
+            Self::MonitorLabels(v) => s.preview_options.monitor_labels = *v,
+            Self::PreviewFitBehavior(v) => s.preview_fit_behavior = *v,
+            Self::LineWidthPx(v) => s.line_width_px = *v,
+            Self::LineOpacity(v) => s.line_opacity = *v,
+            Self::DwellShapeKind(v) => s.selected_dwell_shape = *v,
+            Self::MinDwellSize(v) => s.min_dwell_shape_size = *v,
+            Self::MaxDwellSize(v) => s.max_dwell_shape_size = *v,
+            Self::DwellGrowthRate(v) => s.dwell_growth_rate = *v,
+            Self::DwellFillOpacity(v) => s.dwell_fill_opacity = *v,
+            Self::DwellOutlineWidth(v) => s.dwell_outline_width = *v,
+            Self::DwellRenderMode(v) => s.dwell_render_mode = *v,
+            Self::CanvasVisuals => {}
+            Self::AppColoringEnabled(v) => s.app_specific_coloring_enabled = *v,
+            Self::AppRuleColor(id, c) => {
+                s.application_colors
+                    .set_manual_override_by_rule_id(id, c.clone());
+            }
+            Self::AppRuleRename(id, l) => {
+                let _ = s.application_colors.rename_rule(id, l.clone());
+            }
+            Self::AppRuleMerge { survivor, merged } => {
+                let _ = s.application_colors.merge_rules(survivor, merged);
+            }
+        }
+    }
+}
+#[cfg(test)]
+mod state_update_tests {
+    use super::*;
+    #[test]
+    fn settings_updates_emit_typed_engine_commands() {
+        let mut s = AppState::default();
+        s.apply_settings_update(SettingsUpdate::SamplingIntervalMs(0));
+        assert_eq!(s.settings.sampling_interval_ms, 1);
+        assert_eq!(
+            s.emitted_settings_commands.last(),
+            Some(&EngineSettingsCommand::RecordingConfigChanged)
+        );
+        assert!(s.pending_settings_save.is_some());
     }
 }
