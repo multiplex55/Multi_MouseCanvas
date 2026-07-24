@@ -22,7 +22,7 @@ pub fn preview_scale(available: Vec2, logical: (f32, f32)) -> PreviewTransform {
 
 pub fn render_preview(ui: &mut Ui, canvas: &CanvasModel) {
     let available = Vec2::new(ui.available_width(), 320.0);
-    let transform = preview_scale(available, canvas.dimensions);
+    let transform = preview_scale(available, canvas.canvas_dimensions());
     let (response, painter) = ui.allocate_painter(transform.size, Sense::hover());
     let rect = response.rect;
 
@@ -33,16 +33,10 @@ pub fn render_preview(ui: &mut Ui, canvas: &CanvasModel) {
     }
     painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::DARK_GRAY));
 
-    for path in &canvas.finalized_movement_paths {
+    if let Some(path) = &canvas.active_movement_overlay {
         draw_path(&painter, rect, transform.scale, path);
     }
-    if let Some(path) = &canvas.active_movement_segment {
-        draw_path(&painter, rect, transform.scale, path);
-    }
-    for shape in &canvas.finalized_dwell_shapes {
-        draw_dwell(&painter, rect, transform.scale, shape);
-    }
-    if let Some(shape) = &canvas.active_dwell_shape {
+    if let Some(shape) = &canvas.active_dwell_overlay {
         draw_dwell(&painter, rect, transform.scale, shape);
     }
 

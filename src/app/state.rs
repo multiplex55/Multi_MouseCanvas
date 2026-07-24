@@ -2,6 +2,7 @@ use crate::{
     canvas::{
         coordinates::CanvasPoint,
         model::{CanvasModel, DwellShape, MovementPath},
+        rasterizer::{rasterize_dwell_shape, rasterize_movement_path},
     },
     capture::{
         foreground::{ForegroundApplication, ForegroundResolver},
@@ -18,7 +19,7 @@ use crate::{
 use std::{
     path::PathBuf,
     sync::mpsc::Receiver,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub struct AppState {
@@ -38,6 +39,7 @@ pub struct AppState {
     pub pending_new_session_decision: bool,
     pub recovery_path: Option<PathBuf>,
     pub samples_since_autosave: u64,
+    last_topology_refresh: Instant,
     pub settings_path: Option<PathBuf>,
     pub exit_requested: bool,
 }
@@ -61,6 +63,7 @@ impl Default for AppState {
             pending_new_session_decision: false,
             recovery_path: None,
             samples_since_autosave: 0,
+            last_topology_refresh: Instant::now(),
             settings_path: None,
             exit_requested: false,
         }
@@ -164,6 +167,7 @@ impl AppState {
                 drained.push(sample);
             }
         }
+        self.refresh_display_topology_if_due();
         for sample in drained {
             self.statistics.samples_recorded += 1;
             self.current_cursor_sample = Some(sample.clone());
@@ -187,31 +191,72 @@ impl AppState {
         }
     }
 
+    fn refresh_display_topology_if_due(&mut self) {
+        if self.last_topology_refresh.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_topology_refresh = Instant::now();
+        let Ok(topology) = crate::platform::display::current_topology() else {
+            return;
+        };
+        if topology.signature != self.canvas.current_topology.signature {
+            if let Some(path) = self.canvas.active_movement_overlay.take() {
+                rasterize_movement_path(&mut self.canvas.sparse_tiles, &path);
+            }
+            if let Some(shape) = self.canvas.active_dwell_overlay.take() {
+                rasterize_dwell_shape(&mut self.canvas.sparse_tiles, &shape);
+            }
+            self.canvas
+                .topology_history
+                .record_if_changed(self.canvas.current_topology.clone());
+            self.canvas.session_desktop_bounds = crate::canvas::topology::expand_session_bounds(
+                self.canvas.session_desktop_bounds,
+                &topology,
+            );
+            self.canvas.current_topology = topology.clone();
+            self.canvas.topology_history.record_if_changed(topology);
+            self.canvas.refresh_dimensions();
+        }
+    }
+
     pub fn sync_retained_canvas_and_statistics(&mut self) {
         self.canvas.background.color = self.settings.background_color.clone();
         self.canvas.background.transparent = self.settings.transparent_canvas_mode;
 
-        self.canvas.finalized_movement_paths = self
+        let segments_len = self.movement_classifier.segments.len();
+        for segment in self
             .movement_classifier
             .segments
             .iter()
-            .map(|segment| self.path_from_segment(segment, true))
-            .collect();
-        self.canvas.active_movement_segment = self
+            .skip(self.canvas.committed_movement_count)
+        {
+            let path = self.path_from_segment(segment, true);
+            rasterize_movement_path(&mut self.canvas.sparse_tiles, &path);
+            self.canvas.tile_generation += 1;
+        }
+        self.canvas.committed_movement_count = segments_len;
+        self.canvas.active_movement_overlay = self
             .movement_classifier
             .active_segment()
             .map(|segment| self.path_from_segment(segment, false));
 
-        self.canvas.finalized_dwell_shapes = self
+        let dwells_len = self.movement_classifier.dwells.len();
+        for dwell in self
             .movement_classifier
             .dwells
             .iter()
-            .map(|dwell| self.dwell_shape_from_event(dwell, true))
-            .collect();
-        self.canvas.active_dwell_shape = self
+            .skip(self.canvas.committed_dwell_count)
+        {
+            let shape = self.dwell_shape_from_event(dwell, true);
+            rasterize_dwell_shape(&mut self.canvas.sparse_tiles, &shape);
+            self.canvas.tile_generation += 1;
+        }
+        self.canvas.committed_dwell_count = dwells_len;
+        self.canvas.active_dwell_overlay = self
             .movement_classifier
             .active_dwell()
             .map(|dwell| self.dwell_shape_from_event(&dwell, false));
+        self.canvas.refresh_dimensions();
 
         self.statistics.total_cursor_distance = self.movement_classifier.total_distance;
         self.statistics.finalized_dwell_count = self.movement_classifier.dwells.len() as u64;

@@ -337,7 +337,7 @@ impl AppState {
                 saved_at: SystemTime::now(),
                 application_colors: self.settings.application_colors.clone(),
                 statistics: self.statistics.clone(),
-                virtual_desktop_bounds: self.canvas.virtual_desktop_bounds,
+                virtual_desktop_bounds: self.canvas.session_desktop_bounds,
                 completed,
             };
             let _ = recovery::save_recovery(path, &state);

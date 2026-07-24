@@ -76,29 +76,47 @@ pub fn render_canvas_to_image(canvas: &CanvasModel, options: &ExportOptions) -> 
     for p in img.pixels_mut() {
         *p = bg;
     }
-    let sx = size.width as f32 / canvas.dimensions.0.max(1.0);
-    let sy = size.height as f32 / canvas.dimensions.1.max(1.0);
-    for path in canvas
-        .finalized_movement_paths
-        .iter()
-        .chain(canvas.active_movement_segment.iter())
-    {
-        draw_path(&mut img, path, sx, sy);
+    let dims = canvas.canvas_dimensions();
+    let sx = size.width as f32 / dims.0.max(1.0);
+    let sy = size.height as f32 / dims.1.max(1.0);
+    let min_x = canvas.session_desktop_bounds.min_x;
+    let min_y = canvas.session_desktop_bounds.min_y;
+    for (coord, tile) in &canvas.sparse_tiles.tiles {
+        for ty in 0..canvas.sparse_tiles.tile_size {
+            for tx in 0..canvas.sparse_tiles.tile_size {
+                let idx = ((ty * canvas.sparse_tiles.tile_size + tx) * 4) as usize;
+                if tile.pixels[idx + 3] == 0 {
+                    continue;
+                }
+                let dx = coord.x * canvas.sparse_tiles.tile_size as i32 + tx as i32;
+                let dy = coord.y * canvas.sparse_tiles.tile_size as i32 + ty as i32;
+                put(
+                    &mut img,
+                    ((dx as f32 - min_x) * sx) as i32,
+                    ((dy as f32 - min_y) * sy) as i32,
+                    Rgba([
+                        tile.pixels[idx],
+                        tile.pixels[idx + 1],
+                        tile.pixels[idx + 2],
+                        tile.pixels[idx + 3],
+                    ]),
+                );
+            }
+        }
     }
-    for shape in canvas
-        .finalized_dwell_shapes
-        .iter()
-        .chain(canvas.active_dwell_shape.iter())
-    {
-        draw_dwell(&mut img, shape, sx, sy);
+    for path in canvas.active_movement_overlay.iter() {
+        draw_path_offset(&mut img, path, sx, sy, min_x, min_y);
+    }
+    for shape in canvas.active_dwell_overlay.iter() {
+        draw_dwell_offset(&mut img, shape, sx, sy, min_x, min_y);
     }
     img
 }
 
 pub fn export_size(canvas: &CanvasModel, custom: Option<ExportSize>) -> ExportSize {
     custom.unwrap_or_else(|| ExportSize {
-        width: canvas.dimensions.0.round().max(1.0) as u32,
-        height: canvas.dimensions.1.round().max(1.0) as u32,
+        width: canvas.canvas_dimensions().0.round().max(1.0) as u32,
+        height: canvas.canvas_dimensions().1.round().max(1.0) as u32,
     })
 }
 
@@ -169,13 +187,16 @@ fn put(img: &mut RgbaImage, x: i32, y: i32, c: Rgba<u8>) {
     }
 }
 fn draw_path(img: &mut RgbaImage, path: &MovementPath, sx: f32, sy: f32) {
+    draw_path_offset(img, path, sx, sy, 0.0, 0.0)
+}
+fn draw_path_offset(img: &mut RgbaImage, path: &MovementPath, sx: f32, sy: f32, ox: f32, oy: f32) {
     for pair in path.points.windows(2) {
         line(
             img,
-            (pair[0].x * sx) as i32,
-            (pair[0].y * sy) as i32,
-            (pair[1].x * sx) as i32,
-            (pair[1].y * sy) as i32,
+            ((pair[0].x - ox) * sx) as i32,
+            ((pair[0].y - oy) * sy) as i32,
+            ((pair[1].x - ox) * sx) as i32,
+            ((pair[1].y - oy) * sy) as i32,
             (path.width * ((sx + sy) / 2.0)).max(1.0) as i32,
             rgba(&path.color),
         );
@@ -204,8 +225,11 @@ fn line(img: &mut RgbaImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, w: i32,
     }
 }
 fn draw_dwell(img: &mut RgbaImage, s: &DwellShape, sx: f32, sy: f32) {
-    let cx = (s.center.x * sx) as i32;
-    let cy = (s.center.y * sy) as i32;
+    draw_dwell_offset(img, s, sx, sy, 0.0, 0.0)
+}
+fn draw_dwell_offset(img: &mut RgbaImage, s: &DwellShape, sx: f32, sy: f32, ox: f32, oy: f32) {
+    let cx = ((s.center.x - ox) * sx) as i32;
+    let cy = ((s.center.y - oy) * sy) as i32;
     let r = (s.size * ((sx + sy) / 2.0) / 2.0).max(1.0) as i32;
     let mut fill = rgba(&s.color);
     fill[3] = ((fill[3] as f32) * s.fill_opacity.clamp(0.0, 1.0)) as u8;
@@ -364,7 +388,9 @@ mod tests {
     #[test]
     fn export_uses_logical_canvas_dimensions_not_preview() {
         let c = CanvasModel {
-            dimensions: (321.0, 123.0),
+            session_desktop_bounds: crate::canvas::coordinates::DesktopRect::new(
+                0.0, 0.0, 321.0, 123.0,
+            ),
             ..Default::default()
         };
         let img = render_canvas_to_image(&c, &opts(Path::new("x")));
@@ -373,7 +399,7 @@ mod tests {
     #[test]
     fn transparent_export_preserves_alpha() {
         let mut c = CanvasModel::default();
-        c.dimensions = (2.0, 2.0);
+        c.session_desktop_bounds = crate::canvas::coordinates::DesktopRect::new(0.0, 0.0, 2.0, 2.0);
         c.background.color = RgbaColor::new(1, 2, 3, 255);
         let img = render_canvas_to_image(&c, &opts(Path::new("x")));
         assert_eq!(img.get_pixel(0, 0)[3], 0);
@@ -388,7 +414,9 @@ mod tests {
     #[test]
     fn active_state_is_rendered() {
         let mut c = CanvasModel {
-            dimensions: (10.0, 10.0),
+            session_desktop_bounds: crate::canvas::coordinates::DesktopRect::new(
+                0.0, 0.0, 10.0, 10.0,
+            ),
             ..Default::default()
         };
         let mut p = MovementPath::new(RgbaColor::new(255, 0, 0, 255), 1.0, false);
@@ -396,7 +424,7 @@ mod tests {
             CanvasPoint { x: 0.0, y: 0.0 },
             CanvasPoint { x: 9.0, y: 0.0 },
         ];
-        c.active_movement_segment = Some(p);
+        c.active_movement_overlay = Some(p);
         let img = render_canvas_to_image(&c, &opts(Path::new("x")));
         assert_eq!(img.get_pixel(5, 0)[0], 255);
     }
