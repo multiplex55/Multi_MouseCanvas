@@ -1,4 +1,8 @@
-use super::coordinates::{CanvasPoint, VirtualDesktopBounds};
+use super::{
+    coordinates::{CanvasPoint, VirtualDesktopBounds},
+    tiles::SparseTileStore,
+    topology::{DisplayTopology, TopologyHistory},
+};
 use crate::{
     capture::foreground::ApplicationIdentity,
     settings::model::{DwellRenderMode, DwellShapeKind, RgbaColor},
@@ -106,48 +110,69 @@ impl DwellShape {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasModel {
     pub background: CanvasBackground,
-    pub finalized_movement_paths: Vec<MovementPath>,
-    pub finalized_dwell_shapes: Vec<DwellShape>,
-    pub active_movement_segment: Option<MovementPath>,
-    pub active_dwell_shape: Option<DwellShape>,
-    pub dimensions: (f32, f32),
-    pub virtual_desktop_bounds: VirtualDesktopBounds,
+    pub sparse_tiles: SparseTileStore,
+    pub session_desktop_bounds: VirtualDesktopBounds,
+    pub current_topology: DisplayTopology,
+    pub topology_history: TopologyHistory,
+    pub active_movement_overlay: Option<MovementPath>,
+    pub active_dwell_overlay: Option<DwellShape>,
     pub point_merge_distance: f32,
+    pub committed_movement_count: usize,
+    pub committed_dwell_count: usize,
+    pub tile_generation: u64,
+    #[serde(skip)]
+    pub dimensions: (f32, f32),
 }
 
 impl Default for CanvasModel {
     fn default() -> Self {
+        let current_topology = DisplayTopology::default();
+        let session_desktop_bounds = current_topology.bounds().unwrap_or_else(|| {
+            VirtualDesktopBounds::new(0.0, 0.0, DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT)
+        });
         Self {
             background: CanvasBackground::default(),
-            finalized_movement_paths: Vec::new(),
-            finalized_dwell_shapes: Vec::new(),
-            active_movement_segment: None,
-            active_dwell_shape: None,
-            dimensions: (DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT),
-            virtual_desktop_bounds: VirtualDesktopBounds::new(
-                0.0,
-                0.0,
-                DEFAULT_CANVAS_WIDTH,
-                DEFAULT_CANVAS_HEIGHT,
-            ),
+            sparse_tiles: SparseTileStore::default(),
+            session_desktop_bounds,
+            current_topology,
+            topology_history: TopologyHistory::default(),
+            active_movement_overlay: None,
+            active_dwell_overlay: None,
             point_merge_distance: DEFAULT_POINT_MERGE_DISTANCE,
+            committed_movement_count: 0,
+            committed_dwell_count: 0,
+            tile_generation: 0,
+            dimensions: (
+                session_desktop_bounds.width(),
+                session_desktop_bounds.height(),
+            ),
         }
     }
 }
 
 impl CanvasModel {
     pub fn clear(&mut self) {
-        self.finalized_movement_paths.clear();
-        self.finalized_dwell_shapes.clear();
-        self.active_movement_segment = None;
-        self.active_dwell_shape = None;
+        self.sparse_tiles.tiles.clear();
+        self.active_movement_overlay = None;
+        self.active_dwell_overlay = None;
+        self.committed_movement_count = 0;
+        self.committed_dwell_count = 0;
     }
 
     pub fn is_empty(&self) -> bool {
-        self.finalized_movement_paths.is_empty()
-            && self.finalized_dwell_shapes.is_empty()
-            && self.active_movement_segment.is_none()
-            && self.active_dwell_shape.is_none()
+        self.sparse_tiles.tiles.is_empty()
+            && self.active_movement_overlay.is_none()
+            && self.active_dwell_overlay.is_none()
+    }
+    pub fn canvas_dimensions(&self) -> (f32, f32) {
+        (
+            self.session_desktop_bounds.width(),
+            self.session_desktop_bounds.height(),
+        )
+    }
+
+    pub fn refresh_dimensions(&mut self) {
+        self.dimensions = self.canvas_dimensions();
     }
 }
 

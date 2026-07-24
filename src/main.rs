@@ -12,6 +12,7 @@ mod tray;
 use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() -> eframe::Result<()> {
+    platform::display::set_process_dpi_awareness();
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init()
