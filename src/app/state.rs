@@ -34,6 +34,10 @@ pub struct AppState {
     pub statistics: SessionStatistics,
     pub settings: AppSettings,
     pub status_message: Option<String>,
+    pub has_unexported_canvas: bool,
+    pub pending_new_session_decision: bool,
+    pub recovery_path: Option<PathBuf>,
+    pub samples_since_autosave: u64,
     pub settings_path: Option<PathBuf>,
 }
 
@@ -52,6 +56,10 @@ impl Default for AppState {
             statistics: SessionStatistics::default(),
             settings: AppSettings::default(),
             status_message: None,
+            has_unexported_canvas: false,
+            pending_new_session_decision: false,
+            recovery_path: None,
+            samples_since_autosave: 0,
             settings_path: None,
         }
     }
@@ -80,6 +88,23 @@ impl AppState {
             }
         }
         state.movement_classifier = MovementClassifier::new(&state.settings);
+        if let Ok(path) = storage::default_settings_path() {
+            let recovery_path = path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("recovery")
+                .join("autosave.recovery.json");
+            if matches!(
+                crate::session::recovery::detect_incomplete(&recovery_path),
+                crate::session::recovery::RecoveryStatus::Incomplete(_)
+            ) {
+                state.status_message = Some(
+                    "Incomplete recovery data found. Restore or discard it before recording."
+                        .to_owned(),
+                );
+            }
+            state.recovery_path = Some(recovery_path);
+        }
         if state.settings.start_recording_automatically {
             state.start_recording();
         }
@@ -152,6 +177,11 @@ impl AppState {
                 .set_foreground_context(app.identity, color);
             self.movement_classifier.accept_sample(sample);
             self.sync_retained_canvas_and_statistics();
+            self.samples_since_autosave += 1;
+            if self.samples_since_autosave >= 60 {
+                self.autosave_recovery(false);
+                self.samples_since_autosave = 0;
+            }
         }
     }
 

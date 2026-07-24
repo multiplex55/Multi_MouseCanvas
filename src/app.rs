@@ -44,7 +44,7 @@ impl eframe::App for MultiMouseCanvasApp {
                     )
                     .clicked()
                 {
-                    self.state.start_recording();
+                    self.state.request_start_recording();
                 }
 
                 let pause_label = match self.state.recording_status {
@@ -75,7 +75,44 @@ impl eframe::App for MultiMouseCanvasApp {
                     self.state.clear_canvas_when_safe();
                 }
 
-                ui.add_enabled(false, egui::Button::new("Export image (coming soon)"));
+                if ui
+                    .add_enabled(
+                        !self.state.canvas.is_empty(),
+                        egui::Button::new("Export PNG"),
+                    )
+                    .clicked()
+                {
+                    self.state.export_canvas_to_default();
+                }
+            });
+
+            if self.state.pending_new_session_decision {
+                ui.horizontal(|ui| {
+                    ui.label("Unexported canvas exists:");
+                    if ui.button("Clear previous canvas").clicked() {
+                        self.state.resolve_new_session(
+                            crate::app::commands::NewSessionOutcome::ClearPreviousCanvas,
+                        );
+                    }
+                    if ui.button("Preserve/export previous canvas").clicked() {
+                        self.state.resolve_new_session(
+                            crate::app::commands::NewSessionOutcome::PreserveForExport,
+                        );
+                    }
+                    if ui.button("Cancel new session").clicked() {
+                        self.state
+                            .resolve_new_session(crate::app::commands::NewSessionOutcome::Cancel);
+                    }
+                });
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Restore recovery").clicked() {
+                    self.state.restore_recovery();
+                }
+                if ui.button("Discard recovery").clicked() {
+                    self.state.discard_recovery();
+                }
             });
 
             ui.collapsing("Settings", |ui| {
