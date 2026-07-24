@@ -6,7 +6,6 @@ use crate::settings::model::PreviewOptions;
 use egui::{Ui, Vec2};
 use std::cell::RefCell;
 thread_local! { static PREVIEW_CACHE: RefCell<TilePreviewCache> = RefCell::new(TilePreviewCache::default()); }
-pub use preview::{preview_scale, PreviewTransform};
 pub fn render_preview(ui: &mut Ui, canvas: &CanvasModel) {
     render_preview_sized(
         ui,

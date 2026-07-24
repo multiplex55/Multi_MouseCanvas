@@ -57,7 +57,7 @@ fn current_process_memory_bytes() -> u64 {
             &mut c,
             std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
         )
-        .as_bool()
+        .is_ok()
         {
             c.WorkingSetSize as u64
         } else {

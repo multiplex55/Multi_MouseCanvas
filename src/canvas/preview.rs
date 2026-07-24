@@ -198,7 +198,7 @@ fn draw_monitors(
         let min = map_point(rect, t, c, m.physical_rect.min_x, m.physical_rect.min_y);
         let max = map_point(rect, t, c, m.physical_rect.max_x, m.physical_rect.max_y);
         let r = Rect::from_min_max(min, max);
-        p.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(120)));
+        p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_white_alpha(120)));
         if labels {
             p.text(
                 r.left_top() + egui::vec2(6.0, 6.0),
