@@ -1,6 +1,9 @@
 //! Windows-specific cursor polling sampler.
 
-use super::sampler::{sampling_interval_from_ms, CursorSample, CursorSampler, SamplerCommand};
+use super::sampler::{
+    bounded_sample_channel, sampling_interval_from_ms, try_send_coalesced, CursorSample,
+    CursorSampler, SamplerCommand,
+};
 use std::{
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
@@ -27,7 +30,7 @@ impl WindowsPollingSampler {
 impl CursorSampler for WindowsPollingSampler {
     fn start(&mut self) -> Receiver<CursorSample> {
         self.stop();
-        let (sample_tx, sample_rx) = mpsc::channel();
+        let (sample_tx, sample_rx) = bounded_sample_channel();
         let (command_tx, command_rx) = mpsc::channel();
         let sampling_interval = self.sampling_interval;
         self.command_tx = Some(command_tx);
@@ -36,7 +39,10 @@ impl CursorSampler for WindowsPollingSampler {
                 break;
             }
             if let Some((x, y)) = global_cursor_position() {
-                let _ = sample_tx.send(CursorSample::new(Instant::now(), x as f32, y as f32));
+                let _ = try_send_coalesced(
+                    &sample_tx,
+                    CursorSample::new(Instant::now(), x as f32, y as f32),
+                );
             }
             thread::sleep(sampling_interval);
         }));
