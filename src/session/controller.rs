@@ -4,6 +4,10 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+/// Maximum raw geometry retained for the in-progress movement chunk. Finished
+/// chunks are consumed by the engine and rasterized into sparse tiles.
+pub const ACTIVE_PATH_POINT_LIMIT: usize = 2048;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MovementSegment {
     pub points: Vec<(f32, f32)>,
@@ -157,6 +161,12 @@ impl MovementClassifier {
         }
     }
 
+    /// Convenience entry point for deterministic producers. The caller owns
+    /// the clock, so simulations never need to sleep.
+    pub fn accept_at(&mut self, timestamp: Instant, physical_x: f32, physical_y: f32) {
+        self.accept_sample(CursorSample::new(timestamp, physical_x, physical_y));
+    }
+
     fn anchor(&mut self, sample: CursorSample) {
         self.discontinuity_pending = false;
         self.previous_accepted = Some(sample.clone());
@@ -181,6 +191,9 @@ impl MovementClassifier {
             color: self.current_color.clone(),
         });
         segment.points.push((sample.physical_x, sample.physical_y));
+        if segment.points.len() >= ACTIVE_PATH_POINT_LIMIT {
+            self.finalize_active_segment();
+        }
     }
 
     fn update_dwell(&mut self, sample: &CursorSample) {

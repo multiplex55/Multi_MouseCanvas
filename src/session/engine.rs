@@ -22,6 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+type MonotonicNow = Box<dyn FnMut() -> Instant + Send>;
+
 pub const ENGINE_COMMAND_BOUND: usize = 128;
 pub const ENGINE_SAMPLE_BOUND: usize = 256;
 pub const ENGINE_SNAPSHOT_BOUND: usize = 8;
@@ -49,7 +51,9 @@ impl RecordingEngineHandle {
         }
     }
     pub fn shutdown(&mut self) {
-        let _ = self.command_tx.try_send(EngineCommand::Shutdown);
+        // A bounded queue may be full during a busy session. A blocking send
+        // guarantees the worker observes shutdown before we join it.
+        let _ = self.command_tx.send(EngineCommand::Shutdown);
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
@@ -70,6 +74,7 @@ pub struct RecordingEngine {
     foreground_resolver: Option<Box<dyn ForegroundResolver>>,
     current_foreground: ForegroundApplication,
     last_foreground_check: Option<Instant>,
+    monotonic_now: MonotonicNow,
     status_messages: Vec<String>,
     errors: Vec<String>,
     sequence: u64,
@@ -80,6 +85,17 @@ impl RecordingEngine {
         settings: AppSettings,
         foreground_resolver: Option<Box<dyn ForegroundResolver>>,
     ) -> Self {
+        Self::new_with_clock(settings, foreground_resolver, Box::new(Instant::now))
+    }
+
+    /// Constructs an engine with an injected monotonic clock. Cursor sample
+    /// timestamps remain supplied by the sampler; this clock controls engine
+    /// throttles such as foreground metadata refresh.
+    pub fn new_with_clock(
+        settings: AppSettings,
+        foreground_resolver: Option<Box<dyn ForegroundResolver>>,
+        monotonic_now: MonotonicNow,
+    ) -> Self {
         Self {
             status: RecordingStatus::Stopped,
             classifier: MovementClassifier::new(&settings),
@@ -89,6 +105,7 @@ impl RecordingEngine {
             foreground_resolver,
             current_foreground: ForegroundApplication::unknown(),
             last_foreground_check: None,
+            monotonic_now,
             status_messages: Vec::new(),
             errors: Vec::new(),
             sequence: 0,
@@ -186,13 +203,14 @@ impl RecordingEngine {
         self.statistics.current_dwell_duration = self.classifier.current_dwell_duration();
     }
     fn resolve_foreground_bounded(&mut self) {
+        let now = (self.monotonic_now)();
         if self
             .last_foreground_check
-            .is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+            .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_millis(250))
         {
             return;
         }
-        self.last_foreground_check = Some(Instant::now());
+        self.last_foreground_check = Some(now);
         self.current_foreground = match self.foreground_resolver.as_mut() {
             Some(r) => r
                 .resolve_foreground()
@@ -320,5 +338,37 @@ mod tests {
             ));
         }
         assert!(calls.load(Ordering::SeqCst) < 20);
+    }
+
+    #[test]
+    fn injected_clock_controls_foreground_sampling_without_sleeping() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let clock_ticks = Arc::new(AtomicUsize::new(0));
+        let ticks = clock_ticks.clone();
+        let epoch = Instant::now();
+        let mut e = RecordingEngine::new_with_clock(
+            AppSettings::default(),
+            Some(Box::new(CountingResolver {
+                calls: calls.clone(),
+            })),
+            Box::new(move || {
+                epoch + Duration::from_millis(ticks.fetch_add(300, Ordering::SeqCst) as u64)
+            }),
+        );
+        e.status = RecordingStatus::Recording;
+        e.accept_sample(CursorSample::new(epoch, 0.0, 0.0));
+        e.accept_sample(CursorSample::new(
+            epoch + Duration::from_millis(1),
+            1.0,
+            0.0,
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn background_worker_shuts_down_and_joins() {
+        let mut handle = RecordingEngineHandle::spawn(AppSettings::default(), None);
+        handle.shutdown();
+        assert!(handle.worker.is_none());
     }
 }

@@ -231,10 +231,16 @@ fn atomic_png(path: &Path, image: &RgbaImage) -> io::Result<()> {
     if let Some(p) = path.parent() {
         fs::create_dir_all(p)?;
     }
-    image
-        .save_with_format(&tmp, image::ImageFormat::Png)
-        .map_err(io::Error::other)?;
-    let _ = image::open(&tmp).map_err(io::Error::other)?.to_rgba8();
+    {
+        let mut file = fs::File::create(&tmp)?;
+        image::DynamicImage::ImageRgba8(image.clone())
+            .write_to(&mut file, image::ImageFormat::Png)
+            .map_err(io::Error::other)?;
+        file.sync_all()?;
+    }
+    let _ = image::load_from_memory_with_format(&fs::read(&tmp)?, image::ImageFormat::Png)
+        .map_err(io::Error::other)?
+        .to_rgba8();
     replace(&tmp, path)
 }
 fn atomic_bytes(
@@ -322,5 +328,54 @@ mod tests {
             RecoveryStatus::Malformed(..)
         ));
         assert!(autosave_path(d.path()).exists());
+    }
+
+    #[test]
+    fn unsupported_manifest_and_stale_temporary_file_are_preserved() {
+        let d = tempdir().unwrap();
+        fs::write(
+            d.path().join(MANIFEST_FILENAME),
+            r#"{"schema_version":999}"#,
+        )
+        .unwrap();
+        let stale = d.path().join("manifest.json.tmp-interrupted");
+        fs::write(&stale, "partial").unwrap();
+        assert!(load_session(d.path()).is_err());
+        assert!(d.path().join(MANIFEST_FILENAME).exists());
+        assert!(stale.exists());
+    }
+
+    #[test]
+    fn missing_and_malformed_tiles_do_not_delete_recovery() {
+        let d = tempdir().unwrap();
+        let mut canvas = CanvasModel::default();
+        canvas
+            .sparse_tiles
+            .put_pixel(1, 1, [1, 2, 3, 255], |dst, src| dst.copy_from_slice(&src));
+        let manifest = SessionManifest {
+            schema_version: RECOVERY_SCHEMA_VERSION,
+            session_id: "test".into(),
+            started_at: SystemTime::UNIX_EPOCH,
+            saved_at: SystemTime::UNIX_EPOCH,
+            completed: false,
+            recording_status: RecordingStatus::Stopped,
+            session_bounds: canvas.session_desktop_bounds,
+            current_topology: canvas.current_topology.clone(),
+            topology_history: canvas.topology_history.clone(),
+            statistics: SessionStatistics::default(),
+            background: canvas.background.clone(),
+            tile_size: canvas.sparse_tiles.tile_size,
+            pixel_format: "RGBA8".into(),
+            application_colors: ApplicationColorRegistry::default(),
+            tiles: vec![tile_filename(TileCoordinate { x: 0, y: 0 })],
+        };
+        save_session(d.path(), &manifest, &mut canvas.sparse_tiles).unwrap();
+        let tile = d.path().join("tiles").join(&manifest.tiles[0]);
+        fs::remove_file(&tile).unwrap();
+        assert!(load_session(d.path()).is_err());
+        assert!(d.path().join(MANIFEST_FILENAME).exists());
+        fs::write(&tile, "not a png").unwrap();
+        assert!(load_session(d.path()).is_err());
+        assert!(tile.exists());
     }
 }

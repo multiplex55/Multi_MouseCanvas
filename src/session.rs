@@ -5,5 +5,6 @@ pub mod manifest;
 pub mod model;
 pub mod path_builder;
 pub mod recovery;
+pub mod simulation;
 pub mod snapshot;
 pub mod statistics;
