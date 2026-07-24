@@ -1,6 +1,9 @@
+pub mod client;
 pub mod controller;
 pub mod engine;
+pub mod error;
 pub mod events;
+pub mod export_snapshot;
 pub mod manifest;
 pub mod model;
 pub mod path_builder;

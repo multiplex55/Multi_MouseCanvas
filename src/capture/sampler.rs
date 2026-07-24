@@ -1,7 +1,104 @@
 use std::{
+    collections::VecDeque,
     sync::mpsc::{self, Receiver, Sender, SyncSender},
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SampleMailboxCounters {
+    pub observed: u64,
+    pub delivered: u64,
+    pub coalesced: u64,
+}
+
+#[derive(Debug)]
+struct MailboxState {
+    fifo: VecDeque<CursorSample>,
+    latest: Option<CursorSample>,
+    closed: bool,
+    counters: SampleMailboxCounters,
+}
+
+/// A bounded ordered queue with one replaceable overflow slot. Producers never
+/// block; replacing the slot notifies the consumer immediately.
+#[derive(Debug, Clone)]
+pub struct SampleMailbox {
+    inner: Arc<(Mutex<MailboxState>, Condvar)>,
+    capacity: usize,
+}
+impl SampleMailbox {
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0);
+        Self {
+            inner: Arc::new((
+                Mutex::new(MailboxState {
+                    fifo: VecDeque::with_capacity(capacity),
+                    latest: None,
+                    closed: false,
+                    counters: Default::default(),
+                }),
+                Condvar::new(),
+            )),
+            capacity,
+        }
+    }
+    pub fn push(&self, sample: CursorSample) -> Result<(), CursorSample> {
+        let (lock, wake) = &*self.inner;
+        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if s.closed {
+            return Err(sample);
+        }
+        s.counters.observed += 1;
+        if s.fifo.len() < self.capacity {
+            s.fifo.push_back(sample);
+        } else {
+            s.latest = Some(sample);
+            s.counters.coalesced += 1;
+        }
+        wake.notify_one();
+        Ok(())
+    }
+    pub fn try_pop(&self) -> Option<CursorSample> {
+        let mut s = self.inner.0.lock().unwrap_or_else(|e| e.into_inner());
+        let value = s.fifo.pop_front().or_else(|| s.latest.take());
+        if value.is_some() {
+            s.counters.delivered += 1;
+        }
+        value
+    }
+    pub fn pop_timeout(&self, timeout: Duration) -> Option<CursorSample> {
+        let (lock, wake) = &*self.inner;
+        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if s.fifo.is_empty() && s.latest.is_none() && !s.closed {
+            s = wake
+                .wait_timeout(s, timeout)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        let value = s.fifo.pop_front().or_else(|| s.latest.take());
+        if value.is_some() {
+            s.counters.delivered += 1;
+        }
+        value
+    }
+    pub fn counters(&self) -> SampleMailboxCounters {
+        self.inner
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .counters
+    }
+    pub fn stored_len(&self) -> usize {
+        let s = self.inner.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.fifo.len() + usize::from(s.latest.is_some())
+    }
+    pub fn close(&self) {
+        let (l, w) = &*self.inner;
+        l.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        w.notify_all();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorSample {
@@ -46,6 +143,20 @@ pub fn try_send_coalesced(tx: &SyncSender<CursorSample>, sample: CursorSample) -
 pub trait CursorSampler: Send {
     fn start(&mut self) -> Receiver<CursorSample>;
     fn stop(&mut self);
+}
+
+pub trait SamplerFactory: Send + Sync {
+    fn create(&self, sampling_interval_ms: u64) -> Box<dyn CursorSampler>;
+}
+
+#[derive(Debug, Default)]
+pub struct ProductionSamplerFactory;
+impl SamplerFactory for ProductionSamplerFactory {
+    fn create(&self, sampling_interval_ms: u64) -> Box<dyn CursorSampler> {
+        Box::new(crate::capture::windows::WindowsPollingSampler::new(
+            sampling_interval_ms,
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -118,5 +229,25 @@ mod bounded_tests {
             }
         }
         assert_eq!(accepted, SAMPLE_CHANNEL_BOUND);
+    }
+    #[test]
+    fn mailbox_is_bounded_and_preserves_fifo_then_latest() {
+        let m = SampleMailbox::new(2);
+        let now = Instant::now();
+        for x in 0..5 {
+            m.push(CursorSample::new(now, x as f32, 0.)).unwrap();
+        }
+        assert_eq!(m.stored_len(), 3);
+        assert_eq!(m.try_pop().unwrap().physical_x, 0.);
+        assert_eq!(m.try_pop().unwrap().physical_x, 1.);
+        assert_eq!(m.try_pop().unwrap().physical_x, 4.);
+        assert_eq!(
+            m.counters(),
+            SampleMailboxCounters {
+                observed: 5,
+                delivered: 3,
+                coalesced: 3
+            }
+        );
     }
 }

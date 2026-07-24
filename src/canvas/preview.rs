@@ -19,6 +19,7 @@ pub struct TilePreviewCache {
     textures: HashMap<TileCoordinate, CachedTexture>,
     test_revisions: HashMap<TileCoordinate, u64>,
     pub upload_count: u64,
+    generation: Option<u64>,
 }
 struct CachedTexture {
     revision: u64,
@@ -33,6 +34,19 @@ impl TilePreviewCache {
             self.upload_count += 1;
             self.test_revisions.insert(coord, revision);
         }
+    }
+    /// Applies immutable engine deltas and rejects late data from an older
+    /// session generation. A generation transition atomically drops textures.
+    pub fn accept_delta_for_tests(&mut self, delta: &crate::session::snapshot::TileDelta) -> bool {
+        match self.generation {
+            Some(g) if delta.generation < g => return false,
+            Some(g) if delta.generation > g => { self.textures.clear(); self.test_revisions.clear(); self.generation=Some(delta.generation); }
+            None => self.generation=Some(delta.generation),
+            _ => {}
+        }
+        if delta.removed { self.textures.remove(&delta.coordinate); self.test_revisions.remove(&delta.coordinate); }
+        else { self.sync_tile_for_tests(delta.coordinate, delta.revision); }
+        true
     }
 }
 pub fn preview_scale(available: Vec2, logical: (f32, f32)) -> PreviewTransform {
