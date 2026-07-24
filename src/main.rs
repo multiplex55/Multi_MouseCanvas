@@ -19,8 +19,13 @@ fn main() -> eframe::Result<()> {
 
     let commands = match app::commands::parse_cli_args(std::env::args().skip(1)) {
         Ok(commands) => commands,
+        Err(app::commands::CliParseError::HelpRequested) => {
+            println!("{}", app::commands::cli_help_text());
+            return Ok(());
+        }
         Err(error) => {
             eprintln!("Invalid arguments: {error:?}");
+            eprintln!("{}", app::commands::cli_help_text());
             return Ok(());
         }
     };
