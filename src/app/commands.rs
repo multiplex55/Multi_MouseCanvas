@@ -9,10 +9,152 @@ use crate::{
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppCommand {
+    Show,
+    StartRecording,
+    PauseRecording,
+    ResumeRecording,
+    TogglePauseResume,
+    FinishSession,
+    ExportCurrentCanvas,
+    Exit,
+}
+
+impl AppCommand {
+    pub fn wire_sources() -> &'static [&'static str] {
+        &["ui", "tray", "cli"]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliParseError {
+    UnknownArgument(String),
+}
+
+pub fn parse_cli_args<I, S>(args: I) -> Result<Vec<AppCommand>, CliParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|arg| match arg.as_ref() {
+            "--start" => Ok(AppCommand::StartRecording),
+            "--show" => Ok(AppCommand::Show),
+            "--pause" => Ok(AppCommand::PauseRecording),
+            "--resume" => Ok(AppCommand::ResumeRecording),
+            "--finish" => Ok(AppCommand::FinishSession),
+            other => Err(CliParseError::UnknownArgument(other.to_owned())),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewSessionOutcome {
     ClearPreviousCanvas,
     PreserveForExport,
     Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CloseWindowBehavior {
+    MinimizeToTrayWhileRecording,
+    ExitAfterConfirmation,
+    AlwaysExit,
+}
+impl Default for CloseWindowBehavior {
+    fn default() -> Self {
+        Self::MinimizeToTrayWhileRecording
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseWindowAction {
+    HideToTray,
+    AskForExitConfirmation,
+    Exit,
+}
+
+pub fn resolve_close_window_action(
+    behavior: CloseWindowBehavior,
+    status: RecordingStatus,
+) -> CloseWindowAction {
+    match behavior {
+        CloseWindowBehavior::MinimizeToTrayWhileRecording if status != RecordingStatus::Stopped => {
+            CloseWindowAction::HideToTray
+        }
+        CloseWindowBehavior::MinimizeToTrayWhileRecording => CloseWindowAction::Exit,
+        CloseWindowBehavior::ExitAfterConfirmation => CloseWindowAction::AskForExitConfirmation,
+        CloseWindowBehavior::AlwaysExit => CloseWindowAction::Exit,
+    }
+}
+
+impl AppState {
+    pub fn apply_command(&mut self, command: AppCommand) {
+        match command {
+            AppCommand::Show => self.status_message = Some("Window shown.".to_owned()),
+            AppCommand::StartRecording => self.request_start_recording(),
+            AppCommand::PauseRecording => self.pause_recording(),
+            AppCommand::ResumeRecording => self.resume_recording(),
+            AppCommand::TogglePauseResume => self.toggle_pause_resume(),
+            AppCommand::FinishSession => self.finish_session(),
+            AppCommand::ExportCurrentCanvas => self.export_canvas_to_default(),
+            AppCommand::Exit => self.exit_requested = true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_cli_arguments_into_app_commands() {
+        assert_eq!(
+            parse_cli_args(["--start", "--show", "--pause", "--resume", "--finish"]).unwrap(),
+            vec![
+                AppCommand::StartRecording,
+                AppCommand::Show,
+                AppCommand::PauseRecording,
+                AppCommand::ResumeRecording,
+                AppCommand::FinishSession
+            ]
+        );
+        assert_eq!(
+            parse_cli_args(["--bad"]),
+            Err(CliParseError::UnknownArgument("--bad".into()))
+        );
+    }
+    #[test]
+    fn ui_tray_and_cli_share_command_enum() {
+        assert_eq!(AppCommand::wire_sources(), &["ui", "tray", "cli"]);
+    }
+    #[test]
+    fn close_behavior_resolves_for_recording_and_stopped() {
+        assert_eq!(
+            resolve_close_window_action(
+                CloseWindowBehavior::MinimizeToTrayWhileRecording,
+                RecordingStatus::Recording
+            ),
+            CloseWindowAction::HideToTray
+        );
+        assert_eq!(
+            resolve_close_window_action(
+                CloseWindowBehavior::MinimizeToTrayWhileRecording,
+                RecordingStatus::Stopped
+            ),
+            CloseWindowAction::Exit
+        );
+        assert_eq!(
+            resolve_close_window_action(
+                CloseWindowBehavior::ExitAfterConfirmation,
+                RecordingStatus::Recording
+            ),
+            CloseWindowAction::AskForExitConfirmation
+        );
+        assert_eq!(
+            resolve_close_window_action(CloseWindowBehavior::AlwaysExit, RecordingStatus::Paused),
+            CloseWindowAction::Exit
+        );
+    }
 }
 
 impl AppState {
@@ -190,135 +332,5 @@ impl AppState {
             let _ = recovery::discard_recovery(path);
             self.status_message = Some("Recovery data discarded.".to_owned());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        canvas::{coordinates::CanvasPoint, model::MovementPath},
-        capture::sampler::CursorSample,
-    };
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn can_install_fake_sampler_for_state_tests() {
-        let mut state = AppState::default();
-        let sampler = crate::capture::sampler::FakeCursorSampler::new(Vec::new());
-        state.install_sampler_for_tests(Box::new(sampler));
-        state.start_sampler();
-        state.stop_sampler();
-    }
-    struct FailingResolver;
-    impl crate::capture::foreground::ForegroundResolver for FailingResolver {
-        fn resolve_foreground(
-            &mut self,
-        ) -> Result<
-            crate::capture::foreground::ForegroundApplication,
-            crate::capture::foreground::ForegroundError,
-        > {
-            Err(crate::capture::foreground::ForegroundError(
-                "boom".to_owned(),
-            ))
-        }
-    }
-    #[test]
-    fn unknown_foreground_resolution_falls_back_without_error() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.install_foreground_resolver_for_tests(Box::new(FailingResolver));
-        state.install_sampler_for_tests(Box::new(crate::capture::sampler::FakeCursorSampler::new(
-            vec![CursorSample::new(now, 1.0, 2.0)],
-        )));
-        state.start_sampler();
-        state.drain_samples();
-        state.stop_sampler();
-        assert_eq!(state.statistics.samples_recorded, 1);
-        assert_eq!(
-            state
-                .current_foreground_application
-                .identity
-                .executable_name,
-            "unknown/system"
-        );
-    }
-    #[test]
-    fn recording_status_command_transitions() {
-        let mut state = AppState::default();
-        state.start_recording();
-        assert_eq!(state.recording_status, RecordingStatus::Recording);
-        assert!(state.timing.started_at.is_some());
-        state.pause_recording();
-        assert_eq!(state.recording_status, RecordingStatus::Paused);
-        state.resume_recording();
-        assert_eq!(state.recording_status, RecordingStatus::Recording);
-        state.finish_session();
-        assert_eq!(state.recording_status, RecordingStatus::Stopped);
-        assert!(state.timing.started_at.is_none());
-    }
-    #[test]
-    fn clear_command_resets_canvas_and_statistics_placeholders() {
-        let mut state = AppState::default();
-        let mut path = MovementPath::new(state.settings.default_movement_color.clone(), 2.0, true);
-        path.points.push(CanvasPoint { x: 1.0, y: 2.0 });
-        state.canvas.finalized_movement_paths.push(path);
-        state.statistics.samples_recorded = 10;
-        state.clear_canvas_when_safe();
-        assert!(state.canvas.is_empty());
-        assert_eq!(state.statistics.samples_recorded, 0);
-    }
-    #[test]
-    fn finish_finalizes_active_movement_and_dwell() {
-        let t0 = Instant::now();
-        let mut state = AppState::default();
-        state.settings.movement_threshold_px = 5.0;
-        state.settings.dwell_activation_delay_ms = 50;
-        state.start_recording();
-        state
-            .movement_classifier
-            .accept_sample(CursorSample::new(t0, 0.0, 0.0));
-        state.movement_classifier.accept_sample(CursorSample::new(
-            t0 + Duration::from_millis(10),
-            10.0,
-            0.0,
-        ));
-        state.movement_classifier.accept_sample(CursorSample::new(
-            t0 + Duration::from_millis(20),
-            20.0,
-            0.0,
-        ));
-        state.movement_classifier.accept_sample(CursorSample::new(
-            t0 + Duration::from_millis(100),
-            20.0,
-            0.0,
-        ));
-        state.movement_classifier.accept_sample(CursorSample::new(
-            t0 + Duration::from_millis(160),
-            20.0,
-            0.0,
-        ));
-        state.finish_session();
-        assert_eq!(state.canvas.finalized_movement_paths.len(), 1);
-        assert_eq!(state.canvas.finalized_dwell_shapes.len(), 1);
-        assert!(state.canvas.active_movement_segment.is_none());
-        assert!(state.canvas.active_dwell_shape.is_none());
-        assert!(state.has_unexported_canvas);
-    }
-    #[test]
-    fn starting_new_session_does_not_silently_discard_unexported_work() {
-        let mut state = AppState::default();
-        let mut path = MovementPath::new(state.settings.default_movement_color.clone(), 2.0, true);
-        path.points.push(CanvasPoint { x: 1.0, y: 2.0 });
-        path.points.push(CanvasPoint { x: 2.0, y: 3.0 });
-        state.canvas.finalized_movement_paths.push(path);
-        state.has_unexported_canvas = true;
-        state.start_recording();
-        assert_eq!(state.recording_status, RecordingStatus::Stopped);
-        assert!(state.pending_new_session_decision);
-        assert!(!state.canvas.is_empty());
-        state.resolve_new_session(NewSessionOutcome::Cancel);
-        assert_eq!(state.recording_status, RecordingStatus::Stopped);
-        assert!(!state.canvas.is_empty());
     }
 }

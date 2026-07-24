@@ -39,6 +39,7 @@ pub struct AppState {
     pub recovery_path: Option<PathBuf>,
     pub samples_since_autosave: u64,
     pub settings_path: Option<PathBuf>,
+    pub exit_requested: bool,
 }
 
 impl Default for AppState {
@@ -61,6 +62,7 @@ impl Default for AppState {
             recovery_path: None,
             samples_since_autosave: 0,
             settings_path: None,
+            exit_requested: false,
         }
     }
 }
