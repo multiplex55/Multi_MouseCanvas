@@ -78,3 +78,41 @@ mod tests {
         assert_eq!(loaded, settings);
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct DebouncedSettingsSave {
+    pub delay: std::time::Duration,
+    pub pending_deadline: Option<std::time::Instant>,
+}
+impl DebouncedSettingsSave {
+    pub fn new(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            pending_deadline: None,
+        }
+    }
+    pub fn schedule_at(&mut self, now: std::time::Instant) {
+        self.pending_deadline = Some(now + self.delay)
+    }
+    pub fn should_save(&self, now: std::time::Instant) -> bool {
+        self.pending_deadline.is_some_and(|d| now >= d)
+    }
+    pub fn mark_saved(&mut self) {
+        self.pending_deadline = None
+    }
+}
+
+#[cfg(test)]
+mod debounce_tests {
+    use super::*;
+    #[test]
+    fn debounced_settings_save_scheduling() {
+        let now = std::time::Instant::now();
+        let mut d = DebouncedSettingsSave::new(std::time::Duration::from_millis(350));
+        d.schedule_at(now);
+        assert!(!d.should_save(now + std::time::Duration::from_millis(349)));
+        assert!(d.should_save(now + std::time::Duration::from_millis(350)));
+        d.mark_saved();
+        assert!(!d.should_save(now + std::time::Duration::from_secs(1)));
+    }
+}

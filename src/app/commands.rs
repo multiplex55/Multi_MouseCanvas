@@ -320,7 +320,7 @@ impl AppState {
         self.status_message = Some("Canvas and statistics cleared.".to_owned());
     }
 
-    fn clear_canvas_internal(&mut self) {
+    pub(crate) fn clear_canvas_internal(&mut self) {
         self.canvas.clear();
         self.statistics.reset();
         self.has_unexported_canvas = false;

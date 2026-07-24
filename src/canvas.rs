@@ -4,3 +4,5 @@ pub mod rasterizer;
 pub mod renderer;
 pub mod tiles;
 pub mod topology;
+
+pub mod preview;
