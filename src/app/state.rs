@@ -46,6 +46,10 @@ pub struct AppState {
     pub emitted_settings_commands: Vec<EngineSettingsCommand>,
     pub lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState,
     pub performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics,
+    pub export_busy: bool,
+    pub export_progress: f32,
+    pub export_rx: Option<Receiver<Result<PathBuf, String>>>,
+    pub export_start_new: bool,
 }
 
 impl Default for AppState {
@@ -75,6 +79,10 @@ impl Default for AppState {
             lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState::default(),
             performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics::default(
             ),
+            export_busy: false,
+            export_progress: 0.0,
+            export_rx: None,
+            export_start_new: false,
         }
     }
 }
@@ -109,16 +117,11 @@ impl AppState {
             let recovery_path = path
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
-                .join("recovery")
-                .join("autosave.recovery.json");
-            if matches!(
-                crate::session::recovery::detect_incomplete(&recovery_path),
-                crate::session::recovery::RecoveryStatus::Incomplete(_)
-            ) {
-                state.status_message = Some(
-                    "Incomplete recovery data found. Restore or discard it before recording."
-                        .to_owned(),
-                );
+                .join("recovery");
+            match crate::session::recovery::legacy_status(&recovery_path) {
+                crate::session::recovery::RecoveryStatus::Legacy(_) => state.status_message = Some("Legacy recovery found. Import or explicitly discard it; the original will be retained until conversion succeeds.".into()),
+                crate::session::recovery::RecoveryStatus::Malformed(_, e) => state.status_message = Some(e),
+                _ => {}
             }
             state.recovery_path = Some(recovery_path);
         }
@@ -173,6 +176,29 @@ impl AppState {
     }
 
     pub fn drain_samples(&mut self) {
+        if let Some(result) = self.export_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.export_rx = None;
+            self.export_busy = false;
+            self.export_progress = 1.0;
+            match result {
+                Ok(path) => {
+                    self.has_unexported_canvas = false;
+                    self.status_message = Some(format!("Exported to {}", path.display()));
+                    if self.export_start_new {
+                        self.export_start_new = false;
+                        self.clear_canvas_internal();
+                        if let Some(active) = self.recovery_path.clone() {
+                            self.recovery_path = active.parent().map(|p| p.to_path_buf());
+                        }
+                        self.start_recording();
+                    }
+                }
+                Err(error) => {
+                    self.export_start_new = false;
+                    self.status_message = Some(format!("Export failed; session preserved: {error}"))
+                }
+            }
+        }
         let mut drained = Vec::new();
         if let Some(rx) = &self.sample_rx {
             while let Ok(sample) = rx.try_recv() {
@@ -228,6 +254,7 @@ impl AppState {
             self.canvas.current_topology = topology.clone();
             self.canvas.topology_history.record_if_changed(topology);
             self.canvas.refresh_dimensions();
+            self.autosave_recovery(false);
         }
     }
 
@@ -397,6 +424,15 @@ impl AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         self.stop_sampler();
+        // Bounded best effort: each atomic tile commit is independently valid;
+        // failures are non-fatal during process teardown.
+        if self
+            .recovery_path
+            .as_ref()
+            .is_some_and(|p| p.file_name().and_then(|n| n.to_str()) != Some("recovery"))
+        {
+            self.autosave_recovery(self.recording_status == RecordingStatus::Stopped);
+        }
     }
 }
 
