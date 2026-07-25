@@ -29,7 +29,7 @@ mod imp {
             let export = MenuItem::with_id("export", "Export current canvas", false, None);
             let exit = MenuItem::with_id("exit", "Exit", true, None);
             for item in [&show, &start, &pause, &finish, &export, &exit] {
-                menu.append(*item)
+                menu.append(item)
                     .map_err(|e| TrayInitError(format!("create tray menu: {e}")))?;
             }
             let rgba = [0_u8, 120, 215, 255].repeat(16 * 16);
