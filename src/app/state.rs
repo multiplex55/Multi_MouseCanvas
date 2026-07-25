@@ -41,7 +41,10 @@ pub struct AppState {
     last_recovery_save: Instant,
     last_topology_refresh: Instant,
     pub settings_path: Option<PathBuf>,
-    pub exit_requested: bool,
+    pub tray_available: bool,
+    pub tray_error: Option<String>,
+    pub ui_visible: bool,
+    pub minimize_requested: bool,
     pub pending_settings_save: Option<Instant>,
     pub emitted_settings_commands: Vec<EngineSettingsCommand>,
     pub lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState,
@@ -77,7 +80,10 @@ impl Default for AppState {
             last_recovery_save: Instant::now(),
             last_topology_refresh: Instant::now(),
             settings_path: None,
-            exit_requested: false,
+            tray_available: false,
+            tray_error: None,
+            ui_visible: true,
+            minimize_requested: false,
             pending_settings_save: None,
             emitted_settings_commands: Vec::new(),
             lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState::default(),
@@ -96,6 +102,13 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn prepare_shutdown_checkpoint(&mut self) {
+        // Finalize classifier output before stopping capture; this is deliberately
+        // not Finish, so the recovery remains incomplete/recoverable.
+        self.stop_sampler();
+        self.autosave_recovery(false);
+        self.save_settings_as_status();
+    }
     pub fn load() -> Self {
         let mut state = Self::default();
         match storage::default_settings_path() {

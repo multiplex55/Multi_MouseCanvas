@@ -4,7 +4,11 @@ use super::{
 use crate::{app::state::AppState, canvas::renderer};
 use eframe::egui;
 
-pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) {
+pub fn show(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    lifecycle: &mut crate::app::lifecycle::LifecycleCoordinator,
+) {
     egui::TopBottomPanel::top("recording_toolbar").show(ctx, |ui| toolbar::show(ui, state));
     egui::SidePanel::right("settings_panel")
         .resizable(true)
@@ -52,6 +56,6 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) 
             ));
         });
     });
-    dialogs::show(ctx, state, confirm_exit);
+    dialogs::show(ctx, state, lifecycle);
     monitor_selection::show(ctx, state);
 }

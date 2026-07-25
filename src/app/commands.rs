@@ -18,7 +18,10 @@ pub enum AppCommand {
     TogglePauseResume,
     FinishSession,
     ExportCurrentCanvas,
+    MinimizeToTray,
     Exit,
+    /// Internal tray source marker (not part of the CLI/wire protocol).
+    ExitFromTray,
 }
 
 impl AppCommand {
@@ -85,27 +88,6 @@ impl Default for CloseWindowBehavior {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseWindowAction {
-    HideToTray,
-    AskForExitConfirmation,
-    Exit,
-}
-
-pub fn resolve_close_window_action(
-    behavior: CloseWindowBehavior,
-    status: RecordingStatus,
-) -> CloseWindowAction {
-    match behavior {
-        CloseWindowBehavior::MinimizeToTrayWhileRecording if status != RecordingStatus::Stopped => {
-            CloseWindowAction::HideToTray
-        }
-        CloseWindowBehavior::MinimizeToTrayWhileRecording => CloseWindowAction::Exit,
-        CloseWindowBehavior::ExitAfterConfirmation => CloseWindowAction::AskForExitConfirmation,
-        CloseWindowBehavior::AlwaysExit => CloseWindowAction::Exit,
-    }
-}
-
 impl AppState {
     pub fn apply_command(&mut self, command: AppCommand) {
         match command {
@@ -116,7 +98,8 @@ impl AppState {
             AppCommand::TogglePauseResume => self.toggle_pause_resume(),
             AppCommand::FinishSession => self.finish_session(),
             AppCommand::ExportCurrentCanvas => self.export_canvas_to_default(),
-            AppCommand::Exit => self.exit_requested = true,
+            AppCommand::MinimizeToTray => self.minimize_requested = true,
+            AppCommand::Exit | AppCommand::ExitFromTray => {}
         }
     }
 }
@@ -164,34 +147,6 @@ mod tests {
             parse_cli_args(["--help"]),
             Err(CliParseError::HelpRequested)
         ));
-    }
-    #[test]
-    fn close_behavior_resolves_for_recording_and_stopped() {
-        assert_eq!(
-            resolve_close_window_action(
-                CloseWindowBehavior::MinimizeToTrayWhileRecording,
-                RecordingStatus::Recording
-            ),
-            CloseWindowAction::HideToTray
-        );
-        assert_eq!(
-            resolve_close_window_action(
-                CloseWindowBehavior::MinimizeToTrayWhileRecording,
-                RecordingStatus::Stopped
-            ),
-            CloseWindowAction::Exit
-        );
-        assert_eq!(
-            resolve_close_window_action(
-                CloseWindowBehavior::ExitAfterConfirmation,
-                RecordingStatus::Recording
-            ),
-            CloseWindowAction::AskForExitConfirmation
-        );
-        assert_eq!(
-            resolve_close_window_action(CloseWindowBehavior::AlwaysExit, RecordingStatus::Paused),
-            CloseWindowAction::Exit
-        );
     }
 }
 
