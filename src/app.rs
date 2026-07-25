@@ -31,6 +31,15 @@ impl MultiMouseCanvasApp {
         listener: Option<std::net::TcpListener>,
         initial_commands: Vec<AppCommand>,
     ) -> Self {
+        Self::new_with_startup_warning(_cc, listener, initial_commands, None)
+    }
+
+    pub fn new_with_startup_warning(
+        _cc: &eframe::CreationContext<'_>,
+        listener: Option<std::net::TcpListener>,
+        initial_commands: Vec<AppCommand>,
+        startup_warning: Option<String>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         if let Some(listener) = listener {
             crate::ipc::serve(listener, tx.clone());
@@ -43,8 +52,19 @@ impl MultiMouseCanvasApp {
         };
         state.tray_available = tray.is_some();
         state.tray_error = tray_error;
+        if state.tray_available {
+            tracing::info!("system tray available");
+        } else {
+            tracing::warn!(
+                reason = state.tray_error.as_deref().unwrap_or("unknown"),
+                "system tray unavailable"
+            );
+        }
         for command in initial_commands {
             state.apply_command(command);
+        }
+        if let Some(warning) = startup_warning {
+            state.status_message = Some(format!("Diagnostics warning: {warning}"));
         }
         Self {
             state,
@@ -101,6 +121,7 @@ impl eframe::App for MultiMouseCanvasApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.state.stop_sampler();
         self.state.save_settings_as_status();
+        tracing::info!("GUI shutdown cleanup complete");
     }
 }
 
@@ -114,6 +135,7 @@ impl MultiMouseCanvasApp {
         self.lifecycle.exit_requested(source, worthy);
     }
     fn show_window(&mut self, ctx: &egui::Context) {
+        tracing::info!("application window shown");
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -132,6 +154,7 @@ impl MultiMouseCanvasApp {
             return;
         }
         self.state.ui_visible = false;
+        tracing::info!("application window hidden to tray");
         self.state.status_message = Some("Running in tray; hidden update cadence enabled.".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
     }

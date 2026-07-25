@@ -212,6 +212,7 @@ impl AppState {
                 }
             }
             self.recording_status = RecordingStatus::Recording;
+            tracing::info!("recording started");
             self.mark_started_now();
             if let Some(root) = self.recovery_path.clone() {
                 if root.file_name().and_then(|n| n.to_str()) == Some("recovery") {
@@ -235,6 +236,7 @@ impl AppState {
     pub fn pause_recording(&mut self) {
         if self.recording_status == RecordingStatus::Recording {
             self.recording_status = RecordingStatus::Paused;
+            tracing::info!("recording paused");
             self.stop_sampler();
             self.movement_classifier
                 .mark_discontinuity(crate::session::controller::DiscontinuityReason::PauseResume);
@@ -246,6 +248,7 @@ impl AppState {
     pub fn resume_recording(&mut self) {
         if self.recording_status == RecordingStatus::Paused {
             self.recording_status = RecordingStatus::Recording;
+            tracing::info!("recording resumed");
             self.movement_classifier
                 .mark_discontinuity(crate::session::controller::DiscontinuityReason::PauseResume);
             self.start_sampler();
