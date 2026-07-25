@@ -47,5 +47,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.button("Clear").clicked() {
             state.request_clear_canvas_confirmation();
         }
+        let response = ui.add_enabled(state.tray_available, egui::Button::new("Minimize to tray"));
+        let response = if state.tray_available {
+            response
+        } else {
+            response.on_disabled_hover_text(state.tray_error.as_deref().unwrap_or(
+                "The system tray could not be initialized; the only window will remain visible.",
+            ))
+        };
+        if response.clicked() {
+            state.apply_command(AppCommand::MinimizeToTray);
+        }
     });
 }

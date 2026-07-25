@@ -27,7 +27,11 @@ impl LifecycleDialogState {
         }
     }
 }
-pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) {
+pub fn show(
+    ctx: &egui::Context,
+    state: &mut AppState,
+    lifecycle: &mut crate::app::lifecycle::LifecycleCoordinator,
+) {
     if state.export_busy {
         egui::Window::new("Exporting")
             .collapsible(false)
@@ -59,7 +63,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) 
                 });
             });
     }
-    if *confirm_exit {
+    if lifecycle.confirmation_pending() {
         egui::Window::new("Exit MultiMouseCanvas?")
             .collapsible(false)
             .resizable(false)
@@ -67,12 +71,21 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) 
                 ui.label("Exit and stop any background recording/sampling?");
                 ui.horizontal(|ui| {
                     if ui.button("Exit").clicked() {
-                        state.exit_requested = true;
+                        lifecycle.confirm_exit(std::time::Instant::now());
                     }
                     if ui.button("Cancel").clicked() {
-                        *confirm_exit = false;
+                        lifecycle.cancel_confirmation();
                     }
                 });
+            });
+    }
+    if lifecycle.is_preparing() {
+        egui::Window::new("Saving recovery and exiting…")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Finalizing activity and writing an incomplete recovery checkpoint.");
+                ui.spinner();
             });
     }
 }

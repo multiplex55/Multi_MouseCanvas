@@ -27,7 +27,12 @@ pub fn decide_instance<T: CommandTransport>(
     if transport.claim_primary() {
         return InstanceDecision::Primary;
     }
-    if !commands.is_empty() && commands.iter().copied().all(|c| transport.forward(c)) {
+    let commands = if commands.is_empty() {
+        &[AppCommand::Show][..]
+    } else {
+        commands
+    };
+    if commands.iter().copied().all(|c| transport.forward(c)) {
         InstanceDecision::Forwarded
     } else {
         InstanceDecision::RejectedDuplicate
@@ -79,6 +84,8 @@ fn format_wire_command(command: AppCommand) -> &'static str {
         AppCommand::FinishSession => "finish",
         AppCommand::ExportCurrentCanvas => "export",
         AppCommand::Exit => "exit",
+        AppCommand::MinimizeToTray => "minimize_to_tray",
+        AppCommand::ExitFromTray => "exit",
     }
 }
 fn parse_wire_command(s: &str) -> Option<AppCommand> {
@@ -91,6 +98,7 @@ fn parse_wire_command(s: &str) -> Option<AppCommand> {
         "finish" => AppCommand::FinishSession,
         "export" => AppCommand::ExportCurrentCanvas,
         "exit" => AppCommand::Exit,
+        "minimize_to_tray" => AppCommand::MinimizeToTray,
         _ => return None,
     })
 }
@@ -125,15 +133,13 @@ mod tests {
         assert_eq!(f.forwards, vec![AppCommand::StartRecording]);
     }
     #[test]
-    fn duplicate_without_command_is_rejected() {
+    fn duplicate_without_command_forwards_show() {
         let mut f = Fake {
             claimed: false,
             forwards: vec![],
         };
-        assert_eq!(
-            decide_instance(&mut f, &[]),
-            InstanceDecision::RejectedDuplicate
-        );
+        assert_eq!(decide_instance(&mut f, &[]), InstanceDecision::Forwarded);
+        assert_eq!(f.forwards, vec![AppCommand::Show]);
     }
     #[test]
     fn duplicate_recorder_startup_is_forwarded() {

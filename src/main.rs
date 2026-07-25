@@ -33,14 +33,15 @@ fn main() -> eframe::Result<()> {
     };
     let listener = match ipc::bind_listener() {
         Ok(listener) => Some(listener),
-        Err(_) if !commands.is_empty() => {
+        Err(_) => {
+            let commands = if commands.is_empty() {
+                vec![app::commands::AppCommand::Show]
+            } else {
+                commands
+            };
             for command in commands {
                 let _ = ipc::forward_command(command);
             }
-            return Ok(());
-        }
-        Err(_) => {
-            eprintln!("MultiMouseCanvas is already running.");
             return Ok(());
         }
     };
