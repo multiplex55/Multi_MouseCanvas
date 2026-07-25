@@ -194,6 +194,7 @@ pub fn import_legacy(legacy_path: &Path, session_dir: &Path, session_id: String)
         tile_size: canvas.sparse_tiles.tile_size,
         pixel_format: "RGBA8".into(),
         application_colors: legacy.application_colors,
+        profile_snapshot: None,
         tiles: canvas
             .sparse_tiles
             .tiles
@@ -367,6 +368,7 @@ mod tests {
             tile_size: canvas.sparse_tiles.tile_size,
             pixel_format: "RGBA8".into(),
             application_colors: ApplicationColorRegistry::default(),
+            profile_snapshot: None,
             tiles: vec![tile_filename(TileCoordinate { x: 0, y: 0 })],
         };
         save_session(d.path(), &manifest, &mut canvas.sparse_tiles).unwrap();

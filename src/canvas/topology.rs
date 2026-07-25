@@ -1,4 +1,5 @@
 use super::coordinates::{DesktopPoint, DesktopRect, MonitorBounds, SessionDesktopBounds};
+use crate::platform::display_identity::{DisplayIdentity, DisplayOrientation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10,20 +11,36 @@ pub struct Monitor {
     pub primary: bool,
     pub relative_position: DesktopPoint,
     pub label: Option<String>,
+    #[serde(default)]
+    pub identity: DisplayIdentity,
+    #[serde(default)]
+    pub orientation: DisplayOrientation,
 }
 impl Monitor {
     pub fn new(id: impl Into<String>, rect: MonitorBounds, primary: bool) -> Self {
+        let id = id.into();
         Self {
-            id: id.into(),
+            id: id.clone(),
             physical_rect: rect,
             width: rect.width(),
             height: rect.height(),
             primary,
             relative_position: DesktopPoint::new(rect.min_x, rect.min_y),
             label: None,
+            identity: DisplayIdentity::gdi_fallback(id),
+            orientation: DisplayOrientation::Landscape,
         }
     }
 }
+
+impl Monitor {
+    pub fn stable_key(&self) -> &str {
+        &self.identity.stable_key
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct DisplayLayoutFingerprint(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologySignature(pub String);
@@ -31,6 +48,8 @@ pub struct TopologySignature(pub String);
 pub struct DisplayTopology {
     pub monitors: Vec<Monitor>,
     pub signature: TopologySignature,
+    #[serde(default)]
+    pub fingerprint: DisplayLayoutFingerprint,
 }
 impl DisplayTopology {
     pub fn new(monitors: Vec<Monitor>) -> Self {
@@ -49,9 +68,11 @@ impl DisplayTopology {
             })
             .collect();
         parts.sort();
+        let fingerprint = fingerprint(&monitors);
         Self {
             monitors,
             signature: TopologySignature(parts.join("|")),
+            fingerprint,
         }
     }
     pub fn bounds(&self) -> Option<SessionDesktopBounds> {
@@ -61,6 +82,47 @@ impl DisplayTopology {
     pub fn monitor_containing(&self, p: DesktopPoint) -> Option<&Monitor> {
         self.monitors.iter().find(|m| m.physical_rect.contains(p))
     }
+    /// Returns a new recording topology; the detected topology is left intact.
+    pub fn effective(&self, included_stable_keys: &[String]) -> Self {
+        let keys: std::collections::HashSet<_> =
+            included_stable_keys.iter().map(String::as_str).collect();
+        Self::new(
+            self.monitors
+                .iter()
+                .filter(|m| keys.contains(m.stable_key()))
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+fn fingerprint(monitors: &[Monitor]) -> DisplayLayoutFingerprint {
+    let mut entries: Vec<String> = monitors
+        .iter()
+        .map(|m| {
+            format!(
+                "{}|{:.0},{:.0},{:.0},{:.0}|{:.0}x{:.0}|{:?}|{}",
+                m.stable_key(),
+                m.physical_rect.min_x,
+                m.physical_rect.min_y,
+                m.physical_rect.max_x,
+                m.physical_rect.max_y,
+                m.width,
+                m.height,
+                m.orientation,
+                m.primary
+            )
+        })
+        .collect();
+    entries.sort();
+    // FNV-1a is deliberately specified here, unlike DefaultHasher, so persisted values
+    // remain stable between Rust releases and processes.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in entries.join("\n").bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    DisplayLayoutFingerprint(format!("layout-v1-{hash:016x}"))
 }
 impl Default for DisplayTopology {
     fn default() -> Self {
@@ -209,5 +271,54 @@ mod tests {
         let a = DisplayTopology::new(vec![m("p", DesktopRect::new(0.0, 0.0, 100.0, 200.0))]);
         let b = DisplayTopology::new(vec![m("p", DesktopRect::new(0.0, 0.0, 200.0, 100.0))]);
         assert_ne!(a.signature, b.signature);
+    }
+    #[test]
+    fn fingerprint_ignores_enumeration_order() {
+        let a = m("a", DesktopRect::new(0., 0., 100., 100.));
+        let b = m("b", DesktopRect::new(100., 0., 200., 100.));
+        assert_eq!(
+            DisplayTopology::new(vec![a.clone(), b.clone()]).fingerprint,
+            DisplayTopology::new(vec![b, a]).fingerprint
+        );
+    }
+    #[test]
+    fn fingerprint_tracks_all_layout_properties() {
+        let base = m("a", DesktopRect::new(0., 0., 100., 200.));
+        let fp = DisplayTopology::new(vec![base.clone()]).fingerprint;
+        let mut variants = vec![];
+        let mut v = base.clone();
+        v.physical_rect = DesktopRect::new(1., 0., 101., 200.);
+        variants.push(v);
+        let mut v = base.clone();
+        v.orientation = DisplayOrientation::Portrait;
+        variants.push(v);
+        let mut v = base.clone();
+        v.primary = !v.primary;
+        variants.push(v);
+        let mut v = base.clone();
+        v.width = 200.;
+        variants.push(v);
+        for v in variants {
+            assert_ne!(fp, DisplayTopology::new(vec![v]).fingerprint)
+        }
+        assert_ne!(
+            fp,
+            DisplayTopology::new(vec![
+                base,
+                m("virtual", DesktopRect::new(200., 0., 300., 100.))
+            ])
+            .fingerprint
+        );
+    }
+    #[test]
+    fn effective_topology_keeps_only_selected_geometry() {
+        let a = m("a", DesktopRect::new(0., 0., 100., 100.));
+        let b = m("virtual", DesktopRect::new(100., 0., 200., 100.));
+        let c = m("c", DesktopRect::new(200., 0., 300., 100.));
+        let t = DisplayTopology::new(vec![a.clone(), b, c.clone()]);
+        let e = t.effective(&[a.stable_key().into(), c.stable_key().into()]);
+        assert_eq!(t.monitors.len(), 3);
+        assert_eq!(e.monitors.len(), 2);
+        assert_eq!(e.bounds().unwrap().max_x, 300.);
     }
 }
