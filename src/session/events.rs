@@ -1,3 +1,4 @@
+use crate::display_profiles::DisplayProfileSnapshot;
 use crate::{
     app_colors::registry::ApplicationColorRegistry, canvas::topology::DisplayTopology,
     settings::model::AppSettings,
@@ -7,7 +8,9 @@ use std::{path::PathBuf, sync::Arc};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedDisplayProfile {
     pub settings: Arc<AppSettings>,
-    pub topology: DisplayTopology,
+    pub detected_topology: DisplayTopology,
+    pub effective_topology: DisplayTopology,
+    pub profile: Arc<DisplayProfileSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -50,6 +50,10 @@ pub struct AppState {
     pub export_progress: f32,
     pub export_rx: Option<Receiver<Result<PathBuf, String>>>,
     pub export_start_new: bool,
+    pub display_profiles: crate::display_profiles::DisplayProfileStore,
+    pub display_profiles_path: Option<PathBuf>,
+    pub monitor_selection: Option<crate::app::monitor_selection::MonitorSelectionState>,
+    pub active_display_profile: Option<crate::display_profiles::ImmutableDisplayProfileSnapshot>,
 }
 
 impl Default for AppState {
@@ -83,6 +87,10 @@ impl Default for AppState {
             export_progress: 0.0,
             export_rx: None,
             export_start_new: false,
+            display_profiles: Default::default(),
+            display_profiles_path: None,
+            monitor_selection: None,
+            active_display_profile: None,
         }
     }
 }
@@ -113,6 +121,18 @@ impl AppState {
             }
         }
         state.movement_classifier = MovementClassifier::new(&state.settings);
+        if let Ok(path) = crate::display_profiles::default_path() {
+            state.display_profiles_path = Some(path.clone());
+            match crate::display_profiles::DisplayProfileStore::load(&path) {
+                Ok(store) => state.display_profiles = store,
+                Err(error) => {
+                    tracing::warn!(%error, "display profile load failed; malformed file preserved");
+                    state.status_message = Some(format!(
+                        "Display profiles could not be read; the file was preserved: {error}"
+                    ));
+                }
+            }
+        }
         if let Ok(path) = storage::default_settings_path() {
             let recovery_path = path
                 .parent()

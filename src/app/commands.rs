@@ -234,6 +234,28 @@ impl AppState {
                 self.request_start_recording();
                 return;
             }
+            if self.active_display_profile.is_none() {
+                let Ok(detected) = crate::platform::display::current_topology() else {
+                    self.status_message =
+                        Some("Display detection failed; recording was not started.".into());
+                    return;
+                };
+                if let Some(snapshot) = self
+                    .display_profiles
+                    .exact_match(&detected)
+                    .and_then(|p| p.snapshot(&detected))
+                {
+                    self.canvas.current_topology = snapshot.effective_topology.clone();
+                    self.active_display_profile = Some(std::sync::Arc::new(snapshot));
+                } else {
+                    self.monitor_selection = Some(
+                        crate::app::monitor_selection::MonitorSelectionState::new(detected),
+                    );
+                    self.status_message =
+                        Some("Choose the monitors to record for this display layout.".into());
+                    return;
+                }
+            }
             self.recording_status = RecordingStatus::Recording;
             self.mark_started_now();
             if let Some(root) = self.recovery_path.clone() {
@@ -383,6 +405,7 @@ impl AppState {
                 tile_size: self.canvas.sparse_tiles.tile_size,
                 pixel_format: "RGBA8".into(),
                 application_colors: self.settings.application_colors.clone(),
+                profile_snapshot: self.active_display_profile.as_deref().cloned(),
                 tiles: self
                     .canvas
                     .sparse_tiles

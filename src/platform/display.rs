@@ -78,8 +78,94 @@ fn platform_current_topology() -> Result<DisplayTopology, DisplayError> {
     if monitors.is_empty() {
         Err(DisplayError::Unavailable)
     } else {
+        enrich_display_identities(&mut monitors);
         Ok(DisplayTopology::new(monitors))
     }
+}
+
+#[cfg(windows)]
+fn enrich_display_identities(monitors: &mut [Monitor]) {
+    use crate::platform::display_identity::{AdapterLuid, DisplayOrientation};
+    use windows::Win32::{Devices::Display::*, Foundation::ERROR_SUCCESS};
+    unsafe {
+        let (mut path_count, mut mode_count) = (0, 0);
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+            != ERROR_SUCCESS
+        {
+            return;
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+        if QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        ) != ERROR_SUCCESS
+        {
+            return;
+        }
+        for path in paths.into_iter().take(path_count as usize) {
+            let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of_val(&source) as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            };
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
+                continue;
+            }
+            let gdi = wide(&source.viewGdiDeviceName);
+            let Some(monitor) = monitors
+                .iter_mut()
+                .find(|m| m.label.as_deref() == Some(gdi.as_str()))
+            else {
+                continue;
+            };
+            let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+            target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of_val(&target) as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            };
+            monitor.identity.adapter_luid = Some(AdapterLuid {
+                high: path.targetInfo.adapterId.HighPart,
+                low: path.targetInfo.adapterId.LowPart,
+            });
+            monitor.identity.source_id = Some(path.sourceInfo.id);
+            monitor.identity.target_id = Some(path.targetInfo.id);
+            monitor.identity.gdi_source_name = gdi;
+            monitor.orientation = match path.targetInfo.rotation {
+                DISPLAYCONFIG_ROTATION_ROTATE90 => DisplayOrientation::Portrait,
+                DISPLAYCONFIG_ROTATION_ROTATE180 => DisplayOrientation::LandscapeFlipped,
+                DISPLAYCONFIG_ROTATION_ROTATE270 => DisplayOrientation::PortraitFlipped,
+                _ => DisplayOrientation::Landscape,
+            };
+            if DisplayConfigGetDeviceInfo(&mut target.header) == 0 {
+                monitor.identity.monitor_device_path =
+                    Some(wide(&target.monitorDevicePath)).filter(|s| !s.is_empty());
+                monitor.identity.target_friendly_name =
+                    Some(wide(&target.monitorFriendlyDeviceName)).filter(|s| !s.is_empty());
+                if target.edidManufactureId != 0 {
+                    monitor.identity.edid_manufacturer_id = Some(target.edidManufactureId)
+                }
+                if target.edidProductCodeId != 0 {
+                    monitor.identity.edid_product_code = Some(target.edidProductCodeId)
+                }
+            }
+            // Even a failed target query retains adapter/target identity and the GDI monitor.
+            monitor.identity.rebuild_stable_key();
+            monitor.id = monitor.identity.stable_key.clone();
+        }
+    }
+}
+#[cfg(windows)]
+fn wide(v: &[u16]) -> String {
+    String::from_utf16_lossy(&v[..v.iter().position(|c| *c == 0).unwrap_or(v.len())])
 }
 #[cfg(not(windows))]
 fn platform_current_topology() -> Result<DisplayTopology, DisplayError> {

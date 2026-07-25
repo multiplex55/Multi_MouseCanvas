@@ -1,6 +1,8 @@
 pub mod application_editor;
 pub mod commands;
 pub mod dialogs;
+pub mod display_profile_editor;
+pub mod monitor_selection;
 pub mod performance_view;
 pub mod settings_view;
 pub mod state;

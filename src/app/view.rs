@@ -1,4 +1,6 @@
-use super::{application_editor, dialogs, performance_view, settings_view, toolbar};
+use super::{
+    application_editor, dialogs, monitor_selection, performance_view, settings_view, toolbar,
+};
 use crate::{app::state::AppState, canvas::renderer};
 use eframe::egui;
 
@@ -51,4 +53,5 @@ pub fn show(ctx: &egui::Context, state: &mut AppState, confirm_exit: &mut bool) 
         });
     });
     dialogs::show(ctx, state, confirm_exit);
+    monitor_selection::show(ctx, state);
 }

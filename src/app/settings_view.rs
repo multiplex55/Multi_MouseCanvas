@@ -4,6 +4,9 @@ use crate::{
 };
 use eframe::egui;
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.collapsing("Display Profiles", |ui| {
+        crate::app::display_profile_editor::show(ui, state)
+    });
     ui.collapsing("Recording", |ui| {
         let mut v = state.settings.sampling_interval_ms;
         if ui
