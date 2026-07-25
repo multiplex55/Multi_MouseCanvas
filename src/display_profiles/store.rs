@@ -2,9 +2,13 @@ use super::model::SavedDisplayProfile;
 use crate::canvas::topology::DisplayTopology;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,11 +28,20 @@ impl DisplayProfileStore {
         if let Some(p) = path.parent() {
             fs::create_dir_all(p)?
         }
-        let tmp = temporary_path(path);
         let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        fs::write(&tmp, data)?;
-        fs::File::open(&tmp)?.sync_all()?;
-        fs::rename(tmp, path)
+        let (tmp, mut file) = create_temporary(path)?;
+        let result = (|| {
+            file.write_all(&data)?;
+            file.sync_all()?;
+            // Windows denies a move while this process still owns a non-delete-sharing
+            // handle. Make the lifetime explicit rather than relying on temporary drops.
+            drop(file);
+            atomic_replace(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
     pub fn exact_match(&self, t: &DisplayTopology) -> Option<&SavedDisplayProfile> {
         self.profiles
@@ -96,10 +109,60 @@ pub fn default_path() -> io::Result<PathBuf> {
         })?;
     Ok(dirs.config_dir().join("display-profiles.json"))
 }
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut p = path.as_os_str().to_owned();
-    p.push(".tmp");
-    PathBuf::from(p)
+fn create_temporary(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    for _ in 0..100 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
+        let candidate = PathBuf::from(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a display-profile temporary file",
+    ))
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)?;
+    if let Some(parent) = destination.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        },
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(io::Error::other)
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +226,13 @@ mod tests {
         };
         s.save(&p).unwrap();
         assert_eq!(DisplayProfileStore::load(&p).unwrap(), s);
-        assert!(!p.with_extension("json.tmp").exists());
+        // Replacing an existing destination exercises the Windows-specific path.
+        s.save(&p).unwrap();
+        assert_eq!(DisplayProfileStore::load(&p).unwrap(), s);
+        assert_eq!(
+            std::fs::read_dir(d.path()).unwrap().count(),
+            1,
+            "atomic saves must not leave temporary files behind"
+        );
     }
 }
