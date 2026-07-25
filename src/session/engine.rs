@@ -151,6 +151,9 @@ pub struct RecordingEngine {
     removed: HashSet<crate::canvas::coordinates::TileCoordinate>,
     full_snapshot: bool,
     shutting_down: bool,
+    detected_topology: crate::canvas::topology::DisplayTopology,
+    profile: Option<crate::display_profiles::ImmutableDisplayProfileSnapshot>,
+    excluded: bool,
 }
 impl RecordingEngine {
     pub fn new(settings: AppSettings, fg: Option<Box<dyn ForegroundResolver>>) -> Self {
@@ -201,6 +204,9 @@ impl RecordingEngine {
             removed: HashSet::new(),
             full_snapshot: true,
             shutting_down: false,
+            detected_topology: Default::default(),
+            profile: None,
+            excluded: false,
         }
     }
     fn run(
@@ -274,10 +280,18 @@ impl RecordingEngine {
             return false;
         }
         match cmd {
-            EngineCommand::Start(ResolvedDisplayProfile { settings, topology }) => {
+            EngineCommand::Start(ResolvedDisplayProfile {
+                settings,
+                detected_topology,
+                effective_topology,
+                profile,
+            }) => {
                 self.generation += 1;
                 self.settings = (*settings).clone();
-                self.canvas.current_topology = topology;
+                self.detected_topology = detected_topology;
+                self.canvas.current_topology = effective_topology;
+                self.profile = Some(profile);
+                self.excluded = false;
                 self.classifier = MovementClassifier::new(&self.settings);
                 self.status = RecordingStatus::Recording;
                 self.full_snapshot = true;
@@ -356,6 +370,25 @@ impl RecordingEngine {
     }
     fn accept_sample(&mut self, s: CursorSample) {
         self.statistics.observed_samples += 1;
+        let point = crate::canvas::coordinates::DesktopPoint::new(s.physical_x, s.physical_y);
+        if self.detected_topology.monitor_containing(point).is_some()
+            && self
+                .canvas
+                .current_topology
+                .monitor_containing(point)
+                .is_none()
+        {
+            if !self.excluded {
+                self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
+                self.excluded = true;
+            }
+            return;
+        }
+        if self.excluded {
+            self.classifier
+                .mark_discontinuity(DiscontinuityReason::DisplayConfigurationChanged);
+            self.excluded = false;
+        }
         self.statistics.samples_recorded += 1;
         if self.force_discontinuity {
             self.classifier
@@ -503,10 +536,10 @@ impl RecordingEngine {
         let snap = SessionSnapshot {
             recording_status: self.status,
             session_id: None,
-            detected_topology: self.canvas.current_topology.clone(),
+            detected_topology: self.detected_topology.clone(),
             effective_topology: self.canvas.current_topology.clone(),
             session_bounds: self.canvas.session_desktop_bounds,
-            profile: Some(Arc::new(self.settings.clone())),
+            profile: self.profile.clone(),
             tile_deltas: deltas,
             full_tile_snapshot: self.full_snapshot,
             active_path_overlay: self.canvas.active_movement_overlay.clone(),

@@ -4,8 +4,8 @@ use crate::{
         model::{DwellShape, MovementPath},
         topology::DisplayTopology,
     },
+    display_profiles::DisplayProfileSnapshot,
     session::{error::EngineError, model::RecordingStatus, statistics::SessionStatistics},
-    settings::model::AppSettings,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -33,7 +33,7 @@ pub struct SessionSnapshot {
     pub detected_topology: DisplayTopology,
     pub effective_topology: DisplayTopology,
     pub session_bounds: VirtualDesktopBounds,
-    pub profile: Option<Arc<AppSettings>>,
+    pub profile: Option<Arc<DisplayProfileSnapshot>>,
     pub tile_deltas: Vec<TileDelta>,
     pub full_tile_snapshot: bool,
     pub active_path_overlay: Option<MovementPath>,

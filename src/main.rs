@@ -2,6 +2,7 @@ mod app;
 mod app_colors;
 mod canvas;
 mod capture;
+mod display_profiles;
 mod export;
 mod ipc;
 mod platform;

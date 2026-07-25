@@ -35,6 +35,8 @@ pub struct SessionManifest {
     pub pixel_format: String,
     pub application_colors: ApplicationColorRegistry,
     #[serde(default)]
+    pub profile_snapshot: Option<crate::display_profiles::DisplayProfileSnapshot>,
+    #[serde(default)]
     pub tiles: Vec<String>,
 }
 
