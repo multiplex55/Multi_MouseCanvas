@@ -39,7 +39,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             state.apply_command(AppCommand::FinishSession);
         }
         if ui
-            .add_enabled(!state.canvas.is_empty(), egui::Button::new("Export PNG"))
+            .add_enabled(!state.preview.is_empty(), egui::Button::new("Export PNG"))
             .clicked()
         {
             state.apply_command(AppCommand::ExportCurrentCanvas);
