@@ -2,7 +2,7 @@ use crate::{
     app_colors::registry::ApplicationColorRegistry,
     canvas::{
         coordinates::SessionDesktopBounds,
-        model::CanvasBackground,
+        model::{CanvasBackground, CanvasModel},
         topology::{DisplayTopology, TopologyHistory},
     },
     session::{model::RecordingStatus, statistics::SessionStatistics},
@@ -38,6 +38,48 @@ pub struct SessionManifest {
     pub profile_snapshot: Option<crate::display_profiles::DisplayProfileSnapshot>,
     #[serde(default)]
     pub tiles: Vec<String>,
+}
+
+impl SessionManifest {
+    /// The single construction path for recovery checkpoints. Keeping derived
+    /// canvas fields here prevents normal autosaves, imports, and tests from
+    /// silently producing different manifest shapes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint(
+        session_id: String,
+        started_at: SystemTime,
+        saved_at: SystemTime,
+        completed: bool,
+        recording_status: RecordingStatus,
+        canvas: &CanvasModel,
+        statistics: SessionStatistics,
+        application_colors: ApplicationColorRegistry,
+        profile_snapshot: Option<crate::display_profiles::DisplayProfileSnapshot>,
+    ) -> Self {
+        Self {
+            schema_version: RECOVERY_SCHEMA_VERSION,
+            session_id,
+            started_at,
+            saved_at,
+            completed,
+            recording_status,
+            session_bounds: canvas.session_desktop_bounds,
+            current_topology: canvas.current_topology.clone(),
+            topology_history: canvas.topology_history.clone(),
+            statistics,
+            background: canvas.background.clone(),
+            tile_size: canvas.sparse_tiles.tile_size,
+            pixel_format: "RGBA8".into(),
+            application_colors,
+            profile_snapshot,
+            tiles: canvas
+                .sparse_tiles
+                .tiles
+                .keys()
+                .map(|c| crate::session::recovery::tile_filename(*c))
+                .collect(),
+        }
+    }
 }
 
 /// Timestamp, process id, and a process-local monotonic sequence avoid collisions

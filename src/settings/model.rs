@@ -1,4 +1,4 @@
-use crate::{app::commands::CloseWindowBehavior, app_colors::registry::ApplicationColorRegistry};
+use crate::app_colors::registry::ApplicationColorRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -129,6 +129,7 @@ const fn default_recovery_interval_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub sampling_interval_ms: u64,
     pub movement_threshold_px: f32,
@@ -163,8 +164,6 @@ pub struct AppSettings {
     pub transparent_canvas_mode: bool,
     #[serde(default = "default_movement_smoothing_enabled")]
     pub movement_smoothing_enabled: Option<bool>,
-    #[serde(default)]
-    pub close_window_behavior: CloseWindowBehavior,
     #[serde(default)]
     pub preview_options: PreviewOptions,
     #[serde(default)]
@@ -208,7 +207,6 @@ impl Default for AppSettings {
             dwell_render_mode: DwellRenderMode::FillAndOutline,
             transparent_canvas_mode: false,
             movement_smoothing_enabled: Some(true),
-            close_window_behavior: CloseWindowBehavior::default(),
             preview_options: PreviewOptions::default(),
             preview_fit_behavior: PreviewFitBehavior::default(),
             export_format: ExportFormat::default(),
@@ -253,10 +251,6 @@ mod tests {
         assert_eq!(settings.dwell_render_mode, DwellRenderMode::FillAndOutline);
         assert!(!settings.transparent_canvas_mode);
         assert_eq!(settings.movement_smoothing_enabled, Some(true));
-        assert_eq!(
-            settings.close_window_behavior,
-            CloseWindowBehavior::MinimizeToTrayWhileRecording
-        );
     }
 
     #[test]
@@ -283,10 +277,61 @@ mod tests {
         assert_eq!(settings.min_dwell_shape_size, 12.0);
         assert_eq!(settings.max_dwell_shape_size, 96.0);
         assert_eq!(settings.movement_smoothing_enabled, Some(true));
+        // Deprecated close_window_behavior is accepted as an unknown field. It is
+        // intentionally omitted when these settings are next serialized.
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("close_window_behavior").is_none());
+    }
+
+    #[test]
+    fn legacy_json_preserves_values_while_defaulting_additive_fields() {
+        let json = r#"{
+            "sampling_interval_ms": 27,
+            "movement_threshold_px": 4.5,
+            "dwell_activation_delay_ms": 875,
+            "dwell_growth_rate": 1.75,
+            "line_width_px": 6.0,
+            "default_movement_color":{"r":10,"g":20,"b":30,"a":255},
+            "default_dwell_color":{"r":40,"g":50,"b":60,"a":200},
+            "background_color":{"r":70,"g":80,"b":90,"a":255},
+            "app_specific_coloring_enabled":false,
+            "application_colors":{
+                "mode":"FixedGlobal",
+                "fixed_global_color":{"r":1,"g":2,"b":3,"a":255},
+                "palette":[], "rules":{}, "key_owners":{}, "entries":{}
+            },
+            "export_directory":"legacy-exports",
+            "start_recording_automatically":true,
+            "close_window_behavior":"AlwaysExit"
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.sampling_interval_ms, 27);
+        assert_eq!(settings.dwell_activation_delay_ms, 875);
+        assert_eq!(settings.line_width_px, 6.0);
         assert_eq!(
-            settings.close_window_behavior,
-            CloseWindowBehavior::MinimizeToTrayWhileRecording
+            settings.default_movement_color,
+            RgbaColor::new(10, 20, 30, 255)
         );
+        assert_eq!(
+            settings.default_dwell_color,
+            RgbaColor::new(40, 50, 60, 200)
+        );
+        assert_eq!(settings.background_color, RgbaColor::new(70, 80, 90, 255));
+        assert!(!settings.app_specific_coloring_enabled);
+        assert_eq!(
+            settings.application_colors.fixed_global_color,
+            RgbaColor::new(1, 2, 3, 255)
+        );
+        assert_eq!(settings.export_directory, PathBuf::from("legacy-exports"));
+        assert!(settings.start_recording_automatically);
+        assert_eq!(settings.preview_options, PreviewOptions::default());
+        assert_eq!(settings.preview_fit_behavior, PreviewFitBehavior::default());
+        assert_eq!(settings.export_scale, 1.0);
+        assert_eq!(settings.recovery_interval_ms, 60_000);
+        assert!(serde_json::to_string(&settings)
+            .unwrap()
+            .find("close_window_behavior")
+            .is_none());
     }
 }
 

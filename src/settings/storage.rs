@@ -54,7 +54,22 @@ pub fn save(path: &PathBuf, settings: &AppSettings) -> Result<(), SettingsError>
         })?;
     }
     let text = serde_json::to_string_pretty(settings).map_err(SettingsError::Serialize)?;
-    fs::write(path, text).map_err(|source| SettingsError::Write {
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let write = (|| {
+        use std::io::Write;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        fs::rename(&temporary, path)
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write.map_err(|source| SettingsError::Write {
         path: path.clone(),
         source,
     })

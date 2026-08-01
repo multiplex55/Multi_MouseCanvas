@@ -2,7 +2,7 @@ use super::state::AppState;
 use crate::{
     export::image_export::{export_image, ExportBackground, ExportFormat, ExportOptions},
     session::{
-        manifest::{create_session_directory, SessionManifest, RECOVERY_SCHEMA_VERSION},
+        manifest::{create_session_directory, SessionManifest},
         model::RecordingStatus,
         recovery::{self},
     },
@@ -74,18 +74,6 @@ pub enum NewSessionOutcome {
     ClearPreviousCanvas,
     PreserveForExport,
     Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CloseWindowBehavior {
-    MinimizeToTrayWhileRecording,
-    ExitAfterConfirmation,
-    AlwaysExit,
-}
-impl Default for CloseWindowBehavior {
-    fn default() -> Self {
-        Self::MinimizeToTrayWhileRecording
-    }
 }
 
 impl AppState {
@@ -344,34 +332,20 @@ impl AppState {
     pub fn autosave_recovery(&mut self, completed: bool) {
         self.commit_classifier_output();
         if let Some(path) = &self.recovery_path {
-            let manifest = SessionManifest {
-                schema_version: RECOVERY_SCHEMA_VERSION,
-                session_id: path
-                    .file_name()
+            let manifest = SessionManifest::checkpoint(
+                path.file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("session")
                     .to_owned(),
-                started_at: self.timing.started_at.unwrap_or(SystemTime::UNIX_EPOCH),
-                saved_at: SystemTime::now(),
+                self.timing.started_at.unwrap_or(SystemTime::UNIX_EPOCH),
+                SystemTime::now(),
                 completed,
-                recording_status: self.recording_status,
-                session_bounds: self.canvas.session_desktop_bounds,
-                current_topology: self.canvas.current_topology.clone(),
-                topology_history: self.canvas.topology_history.clone(),
-                statistics: self.statistics.clone(),
-                background: self.canvas.background.clone(),
-                tile_size: self.canvas.sparse_tiles.tile_size,
-                pixel_format: "RGBA8".into(),
-                application_colors: self.settings.application_colors.clone(),
-                profile_snapshot: self.active_display_profile.as_deref().cloned(),
-                tiles: self
-                    .canvas
-                    .sparse_tiles
-                    .tiles
-                    .keys()
-                    .map(|c| recovery::tile_filename(*c))
-                    .collect(),
-            };
+                self.recording_status,
+                &self.canvas,
+                self.statistics.clone(),
+                self.settings.application_colors.clone(),
+                self.active_display_profile.as_deref().cloned(),
+            );
             if let Err(e) = recovery::save_session(path, &manifest, &mut self.canvas.sparse_tiles) {
                 tracing::warn!(%e, "non-fatal recovery save failed");
                 self.status_message =

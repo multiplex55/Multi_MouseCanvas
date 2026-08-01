@@ -179,29 +179,18 @@ pub fn import_legacy(legacy_path: &Path, session_dir: &Path, session_id: String)
     for tile in canvas.sparse_tiles.tiles.values_mut() {
         tile.recovery_dirty = true;
     }
-    let manifest = SessionManifest {
-        schema_version: RECOVERY_SCHEMA_VERSION,
+    canvas.session_desktop_bounds = legacy.virtual_desktop_bounds;
+    let manifest = SessionManifest::checkpoint(
         session_id,
-        started_at: SystemTime::UNIX_EPOCH,
-        saved_at: legacy.saved_at,
-        completed: legacy.completed,
-        recording_status: RecordingStatus::Stopped,
-        session_bounds: legacy.virtual_desktop_bounds,
-        current_topology: canvas.current_topology.clone(),
-        topology_history: canvas.topology_history.clone(),
-        statistics: legacy.statistics,
-        background: canvas.background.clone(),
-        tile_size: canvas.sparse_tiles.tile_size,
-        pixel_format: "RGBA8".into(),
-        application_colors: legacy.application_colors,
-        profile_snapshot: None,
-        tiles: canvas
-            .sparse_tiles
-            .tiles
-            .keys()
-            .map(|c| tile_filename(*c))
-            .collect(),
-    };
+        SystemTime::UNIX_EPOCH,
+        legacy.saved_at,
+        legacy.completed,
+        RecordingStatus::Stopped,
+        &canvas,
+        legacy.statistics,
+        legacy.application_colors,
+        None,
+    );
     save_session(session_dir, &manifest, &mut canvas.sparse_tiles)?;
     // Validate the conversion before returning. The original is intentionally retained.
     load_session(session_dir).map(|_| ())

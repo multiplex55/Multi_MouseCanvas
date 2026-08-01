@@ -20,7 +20,7 @@ Finalized paths and dwells are immediately rasterized into sparse RGBA tiles. On
 
 Current recovery is a directory containing `recovery-version`, `manifest.json`, and `tiles/<x>_<y>.png`. Autosave is time-based and rewrites only recovery-dirty tiles, validates temporary output, then atomically publishes the manifest last. Interrupted `.tmp-*` files are harmless. Malformed, unsupported, incomplete, or legacy data is reported and preserved until the user explicitly imports or discards it. The former `autosave.recovery.json` is import-only compatibility data, not the primary format.
 
-Settings are stored in the platform configuration directory (normally `%APPDATA%\\MultiMouseCanvas\\MultiMouseCanvas\\config\\settings.json`). Missing fields receive defaults, future fields are ignored, and numeric settings are validated/clamped. A parse failure uses in-memory defaults but never overwrites or deletes the original file.
+Settings are stored in the platform configuration directory (normally `%APPDATA%\\MultiMouseCanvas\\MultiMouseCanvas\\config\\settings.json`). Missing fields receive defaults, future fields are ignored, and numeric settings are validated/clamped. A parse failure uses in-memory defaults but never overwrites or deletes the original file. The deprecated `close_window_behavior` value is accepted and ignored when reading old settings and is omitted on the next save; closing and explicitly minimizing are no longer conflated.
 
 ## Export
 
@@ -34,7 +34,13 @@ UI, tray, IPC, and CLI all route the same Start, Pause, Resume, Finish, Export, 
 --show --start --pause --resume --finish --export --exit --help
 ```
 
-Closing the visible window can hide it to the tray while recording, depending on settings. Exiting stops and joins the sampler/background engine before process shutdown.
+**Minimize to tray** is an explicit action. The window X asks for confirmation when work may be lost; X and tray **Exit** stop capture and preserve an incomplete recovery checkpoint rather than silently finishing the session. **Show**, including a duplicate-instance `--show`, restores and focuses the existing window.
+
+Display profiles match an exact complete layout. Stable display identity uses the OS display-config target identity first, then device path/name, then geometry as a last-resort fallback. A profile records which monitors are included; excluded monitors do not produce artwork or active dwell/movement statistics, although total session elapsed time continues. An unknown complete layout requires confirmation and selection rather than guessing. A changed complete layout is a separate profile and may include a monitor excluded by another layout.
+
+Release builds use the GUI subsystem and do not open a console; debug builds retain a console for diagnostics. Logs live beside the executable and rotate through five files. Failure to create or rotate that directory is visible but non-fatal (notably when installed below a protected directory).
+
+Neither artwork diagnostics nor logs contain clicks, keys, screenshots, window contents, typed text, URLs, window titles, or raw retained sample histories. The application does not transmit telemetry.
 
 ## Performance and validation
 

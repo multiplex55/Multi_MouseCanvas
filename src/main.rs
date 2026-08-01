@@ -2,19 +2,7 @@
     all(windows, not(debug_assertions), not(test)),
     windows_subsystem = "windows"
 )]
-
-mod app;
-mod app_colors;
-mod canvas;
-mod capture;
-mod display_profiles;
-mod export;
-mod ipc;
-mod logging;
-mod platform;
-mod session;
-mod settings;
-mod tray;
+use multi_mouse_canvas::{app, ipc, logging, platform};
 
 use std::{
     path::Path,

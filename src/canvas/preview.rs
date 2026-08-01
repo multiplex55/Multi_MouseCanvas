@@ -40,12 +40,20 @@ impl TilePreviewCache {
     pub fn accept_delta_for_tests(&mut self, delta: &crate::session::snapshot::TileDelta) -> bool {
         match self.generation {
             Some(g) if delta.generation < g => return false,
-            Some(g) if delta.generation > g => { self.textures.clear(); self.test_revisions.clear(); self.generation=Some(delta.generation); }
-            None => self.generation=Some(delta.generation),
+            Some(g) if delta.generation > g => {
+                self.textures.clear();
+                self.test_revisions.clear();
+                self.generation = Some(delta.generation);
+            }
+            None => self.generation = Some(delta.generation),
             _ => {}
         }
-        if delta.removed { self.textures.remove(&delta.coordinate); self.test_revisions.remove(&delta.coordinate); }
-        else { self.sync_tile_for_tests(delta.coordinate, delta.revision); }
+        if delta.removed {
+            self.textures.remove(&delta.coordinate);
+            self.test_revisions.remove(&delta.coordinate);
+        } else {
+            self.sync_tile_for_tests(delta.coordinate, delta.revision);
+        }
         true
     }
 }
