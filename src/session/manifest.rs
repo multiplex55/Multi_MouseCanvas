@@ -27,7 +27,13 @@ pub struct SessionManifest {
     pub completed: bool,
     pub recording_status: RecordingStatus,
     pub session_bounds: SessionDesktopBounds,
-    pub current_topology: DisplayTopology,
+    #[serde(default = "empty_topology")]
+    pub detected_topology: DisplayTopology,
+    #[serde(alias = "current_topology", default = "empty_topology")]
+    pub effective_topology: DisplayTopology,
+    #[serde(default = "empty_topology")]
+    pub session_topology: DisplayTopology,
+    #[serde(default)]
     pub topology_history: TopologyHistory,
     pub statistics: SessionStatistics,
     pub background: CanvasBackground,
@@ -64,7 +70,14 @@ impl SessionManifest {
             completed,
             recording_status,
             session_bounds: canvas.session_desktop_bounds,
-            current_topology: canvas.current_topology.clone(),
+            detected_topology: canvas.detected_topology.clone(),
+            effective_topology: canvas.effective_topology.clone(),
+            session_topology: canvas
+                .topology_history
+                .entries
+                .first()
+                .cloned()
+                .unwrap_or_else(|| canvas.effective_topology.clone()),
             topology_history: canvas.topology_history.clone(),
             statistics,
             background: canvas.background.clone(),
@@ -80,6 +93,10 @@ impl SessionManifest {
                 .collect(),
         }
     }
+}
+
+fn empty_topology() -> DisplayTopology {
+    DisplayTopology::new(vec![])
 }
 
 /// Timestamp, process id, and a process-local monotonic sequence avoid collisions

@@ -212,7 +212,8 @@ pub fn restore_canvas(dir: &Path) -> io::Result<(SessionManifest, CanvasModel)> 
     let mut canvas = CanvasModel::default();
     canvas.sparse_tiles = tiles;
     canvas.session_desktop_bounds = m.session_bounds;
-    canvas.current_topology = m.current_topology.clone();
+    canvas.detected_topology = m.detected_topology.clone();
+    canvas.effective_topology = m.effective_topology.clone();
     canvas.topology_history = m.topology_history.clone();
     canvas.background = m.background.clone();
     // Active overlays are deliberately never represented in a manifest.
@@ -404,7 +405,9 @@ mod tests {
             completed: false,
             recording_status: RecordingStatus::Stopped,
             session_bounds: canvas.session_desktop_bounds,
-            current_topology: canvas.current_topology.clone(),
+            detected_topology: canvas.detected_topology.clone(),
+            effective_topology: canvas.effective_topology.clone(),
+            session_topology: canvas.effective_topology.clone(),
             topology_history: canvas.topology_history.clone(),
             statistics: SessionStatistics::default(),
             background: canvas.background.clone(),

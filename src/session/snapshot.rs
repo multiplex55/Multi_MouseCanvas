@@ -2,7 +2,7 @@ use crate::{
     canvas::{
         coordinates::{TileCoordinate, VirtualDesktopBounds},
         model::{DwellShape, MovementPath},
-        topology::DisplayTopology,
+        topology::{DisplayTopology, TopologyHistory},
     },
     display_profiles::DisplayProfileSnapshot,
     session::{error::EngineError, model::RecordingStatus, statistics::SessionStatistics},
@@ -54,6 +54,7 @@ pub struct SessionSnapshot {
     pub detected_topology: DisplayTopology,
     pub effective_topology: DisplayTopology,
     pub session_bounds: VirtualDesktopBounds,
+    pub topology_history: TopologyHistory,
     pub profile: Option<Arc<DisplayProfileSnapshot>>,
     pub tile_deltas: Vec<TileDelta>,
     pub full_tile_snapshot: bool,

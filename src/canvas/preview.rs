@@ -14,6 +14,18 @@ pub struct PreviewTransform {
     pub size: Vec2,
     pub origin: Pos2,
 }
+/// Shared mapping for every item drawn in desktop coordinates.
+pub fn desktop_to_preview(
+    bounds: crate::canvas::coordinates::VirtualDesktopBounds,
+    transform: PreviewTransform,
+    x: f32,
+    y: f32,
+) -> Pos2 {
+    pos2(
+        transform.origin.x + (x - bounds.min_x) * transform.scale,
+        transform.origin.y + (y - bounds.min_y) * transform.scale,
+    )
+}
 #[derive(Default)]
 pub struct TilePreviewCache {
     textures: HashMap<TileCoordinate, CachedTexture>,
@@ -97,11 +109,11 @@ pub fn render(
         }
         let tex = texture_for(ui, cache, *coord, tile, canvas.sparse_tiles.tile_size);
         let s = canvas.sparse_tiles.tile_size as f32;
-        let min = pos2(
-            rect.left()
-                + ((*coord).x as f32 * s - canvas.session_desktop_bounds.min_x) * transform.scale,
-            rect.top()
-                + ((*coord).y as f32 * s - canvas.session_desktop_bounds.min_y) * transform.scale,
+        let min = desktop_to_preview(
+            canvas.session_desktop_bounds,
+            transform,
+            (*coord).x as f32 * s,
+            (*coord).y as f32 * s,
         );
         let r = Rect::from_min_size(min, Vec2::splat(s * transform.scale));
         painter.image(
@@ -124,7 +136,11 @@ pub fn render(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Canvas preview will appear here",
+            if canvas.effective_topology.monitors.is_empty() {
+                "Canvas preview will appear here"
+            } else {
+                "No activity recorded yet"
+            },
             egui::TextStyle::Body.resolve(ui.style()),
             Color32::GRAY,
         );
@@ -158,10 +174,9 @@ fn texture_for(
     cache.textures.get(&coord).unwrap().texture.clone()
 }
 fn map_point(rect: Rect, t: PreviewTransform, c: &CanvasModel, x: f32, y: f32) -> Pos2 {
-    pos2(
-        rect.left() + (x - c.session_desktop_bounds.min_x) * t.scale,
-        rect.top() + (y - c.session_desktop_bounds.min_y) * t.scale,
-    )
+    let mut t = t;
+    t.origin = rect.min;
+    desktop_to_preview(c.session_desktop_bounds, t, x, y)
 }
 fn draw_path(
     p: &egui::Painter,
@@ -224,7 +239,7 @@ fn draw_monitors(
     c: &CanvasModel,
     labels: bool,
 ) {
-    for m in &c.current_topology.monitors {
+    for m in &c.effective_topology.monitors {
         let min = map_point(rect, t, c, m.physical_rect.min_x, m.physical_rect.min_y);
         let max = map_point(rect, t, c, m.physical_rect.max_x, m.physical_rect.max_y);
         let r = Rect::from_min_max(min, max);
@@ -269,6 +284,18 @@ fn color32(c: &RgbaColor) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::coordinates::DesktopRect;
+    #[test]
+    fn negative_desktop_coordinates_use_bounds_local_origin() {
+        let t = PreviewTransform {
+            scale: 0.5,
+            size: Vec2::ZERO,
+            origin: pos2(10., 20.),
+        };
+        let b = DesktopRect::new(-200., -100., 300., 400.);
+        assert_eq!(desktop_to_preview(b, t, -200., -100.), pos2(10., 20.));
+        assert_eq!(desktop_to_preview(b, t, 0., 0.), pos2(110., 70.));
+    }
     #[test]
     fn preview_cache_uploads_only_changed_tile_revisions() {
         let mut c = TilePreviewCache::default();
