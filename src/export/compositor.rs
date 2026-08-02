@@ -6,6 +6,65 @@ use crate::{
     },
 };
 use image::{Rgba, RgbaImage};
+
+pub fn snapshot_artwork_dimensions(
+    snapshot: &crate::session::export_snapshot::ExportSnapshot,
+    options: &ExportOptions,
+) -> (u32, u32) {
+    let scale = options.scale.ratio();
+    (
+        ((snapshot.bounds.max_x - snapshot.bounds.min_x) * scale)
+            .round()
+            .max(1.0) as u32,
+        ((snapshot.bounds.max_y - snapshot.bounds.min_y) * scale)
+            .round()
+            .max(1.0) as u32,
+    )
+}
+
+/// Composites immutable engine-owned state. Active overlays are rasterized only into
+/// this private worker copy and therefore remain live in the recording engine.
+pub fn compose_snapshot(
+    snapshot: &crate::session::export_snapshot::ExportSnapshot,
+    options: &ExportOptions,
+) -> RgbaImage {
+    use crate::canvas::{
+        model::CanvasModel,
+        rasterizer::{rasterize_dwell_shape, rasterize_movement_path},
+        tiles::{SparseTileStore, Tile},
+    };
+    let mut canvas = CanvasModel::default();
+    canvas.session_desktop_bounds = snapshot.bounds;
+    canvas.effective_topology = snapshot.topology.clone();
+    canvas.topology_history = snapshot.topology_history.clone();
+    canvas.background = snapshot.background.clone();
+    canvas.sparse_tiles = SparseTileStore {
+        tile_size: snapshot.tile_size,
+        tiles: snapshot
+            .tiles
+            .iter()
+            .map(|(c, p)| {
+                (
+                    *c,
+                    Tile {
+                        pixels: p.to_vec(),
+                        preview_dirty: false,
+                        recovery_dirty: false,
+                        revision: 0,
+                        contains_artwork: true,
+                    },
+                )
+            })
+            .collect(),
+    };
+    if let Some(path) = &snapshot.active_path {
+        rasterize_movement_path(&mut canvas.sparse_tiles, path);
+    }
+    if let Some(dwell) = &snapshot.active_dwell {
+        rasterize_dwell_shape(&mut canvas.sparse_tiles, dwell);
+    }
+    compose(&canvas, options)
+}
 pub fn artwork_dimensions(canvas: &CanvasModel, options: &ExportOptions) -> (u32, u32) {
     let r = options.scale.ratio();
     (

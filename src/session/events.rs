@@ -6,7 +6,65 @@ use crate::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::SystemTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExportRequestId(u64);
+impl ExportRequestId {
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRequest {
+    pub id: ExportRequestId,
+    pub destination: crate::export::model::ExportDestination,
+    pub format: crate::export::model::ExportFormat,
+    pub timestamp: SystemTime,
+    pub scale: crate::export::model::ExportScale,
+    pub background: crate::export::model::ExportBackground,
+    pub panels: crate::export::model::InformationPanels,
+}
+impl ExportRequest {
+    pub fn png(directory: PathBuf) -> Self {
+        Self {
+            id: ExportRequestId::next(),
+            destination: crate::export::model::ExportDestination::Directory(directory),
+            format: crate::export::model::ExportFormat::Png,
+            timestamp: SystemTime::now(),
+            scale: crate::export::model::ExportScale::Full,
+            background: crate::export::model::ExportBackground::Transparent,
+            panels: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportRejection {
+    ConcurrentExport,
+    NotExportable,
+    UnsupportedFormat,
+    ShuttingDown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportResult {
+    Success {
+        request_id: ExportRequestId,
+        path: PathBuf,
+    },
+    Failure {
+        request_id: ExportRequestId,
+        error: String,
+        retry_request: ExportRequest,
+    },
+    Rejected {
+        request_id: ExportRequestId,
+        reason: ExportRejection,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TransitionRequestId(u64);
@@ -104,7 +162,7 @@ pub enum EngineCommand {
     InvalidateTopology,
     UpdateBackground(AppSettings),
     SetUiVisibility(bool),
-    RequestExport(PathBuf),
+    RequestExport(ExportRequest),
     RequestRecoveryCheckpoint,
     RequestSnapshot,
     RequireFullState(FullStateRequestId),

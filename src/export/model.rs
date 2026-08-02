@@ -1,7 +1,4 @@
-use crate::{
-    app_colors::registry::ApplicationColorRegistry, session::statistics::SessionStatistics,
-    settings::model::RgbaColor,
-};
+use crate::settings::model::RgbaColor;
 use std::{path::PathBuf, time::SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -30,7 +27,7 @@ pub enum ExportBackground {
     Solid(RgbaColor),
     Transparent,
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InformationPanels {
     pub application_legend: bool,
     pub session_times: bool,
@@ -58,10 +55,6 @@ pub struct ExportOptions {
     pub scale: ExportScale,
     pub background: ExportBackground,
     pub panels: InformationPanels,
-    pub statistics: SessionStatistics,
-    pub application_colors: ApplicationColorRegistry,
-    pub started_at: Option<SystemTime>,
-    pub ended_at: Option<SystemTime>,
 }
 impl ExportOptions {
     pub fn basic(dir: PathBuf) -> Self {
@@ -73,10 +66,13 @@ impl ExportOptions {
             scale: ExportScale::Full,
             background: ExportBackground::Transparent,
             panels: Default::default(),
-            statistics: Default::default(),
-            application_colors: Default::default(),
-            started_at: None,
-            ended_at: None,
         }
     }
+}
+
+/// UI-selected destination. Session content is deliberately not represented here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportDestination {
+    Directory(PathBuf),
+    ExactFile(PathBuf),
 }

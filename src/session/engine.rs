@@ -2,14 +2,15 @@ use super::{
     controller::{DiscontinuityReason, MovementClassifier},
     error::EngineError,
     events::{
-        EngineCommand, ResolvedDisplayProfile, TransitionAcknowledgment, TransitionKind,
-        TransitionRejection, TransitionRequestId, TransitionResult,
+        EngineCommand, ExportRejection, ExportRequest, ExportResult, ResolvedDisplayProfile,
+        TransitionAcknowledgment, TransitionKind, TransitionRejection, TransitionRequestId,
+        TransitionResult,
     },
     model::RecordingStatus,
     shutdown::{ShutdownProgress, ShutdownRequest, ShutdownResult, ShutdownTicket},
     snapshot::{
-        CaptureHealth, EngineActivity, EngineConnectionState, SamplerState, SessionSnapshot,
-        SnapshotDeduper, TileDelta,
+        CaptureHealth, EngineActivity, EngineConnectionState, ExportState, SamplerState,
+        SessionSnapshot, SnapshotDeduper, TileDelta,
     },
     statistics::SessionStatistics,
 };
@@ -184,6 +185,9 @@ pub struct RecordingEngine {
     excluded: bool,
     last_observed_at: Option<Instant>,
     full_state_request_id: Option<super::events::FullStateRequestId>,
+    activity: EngineActivity,
+    export_rx: Option<Receiver<ExportResult>>,
+    active_export: Option<ExportRequest>,
 }
 impl RecordingEngine {
     pub fn new(settings: AppSettings, fg: Option<Box<dyn ForegroundResolver>>) -> Self {
@@ -239,6 +243,9 @@ impl RecordingEngine {
             excluded: false,
             last_observed_at: None,
             full_state_request_id: None,
+            activity: EngineActivity::default(),
+            export_rx: None,
+            active_export: None,
         }
     }
     fn run(
@@ -249,6 +256,9 @@ impl RecordingEngine {
         acknowledgments: std::sync::mpsc::Sender<TransitionAcknowledgment>,
     ) {
         loop {
+            if self.poll_export() {
+                self.publish(&snapshots, true);
+            }
             while let Ok(c) = high.try_recv() {
                 match self.apply(c, &acknowledgments) {
                     CommandEffect::None => {}
@@ -304,6 +314,118 @@ impl RecordingEngine {
             .create(self.settings.sampling_interval_ms);
         self.sample_rx = Some(s.start());
         self.sampler = Some(s)
+    }
+    fn request_export(&mut self, request: ExportRequest) -> CommandEffect {
+        if self.activity.export_in_progress() {
+            self.activity.last_export_result = Some(ExportResult::Rejected {
+                request_id: request.id,
+                reason: ExportRejection::ConcurrentExport,
+            });
+            return CommandEffect::PublishImmediately;
+        }
+        if request.format != crate::export::model::ExportFormat::Png {
+            self.activity.last_export_result = Some(ExportResult::Rejected {
+                request_id: request.id,
+                reason: ExportRejection::UnsupportedFormat,
+            });
+            return CommandEffect::PublishImmediately;
+        }
+        let bounds = self.canvas.session_desktop_bounds;
+        if !matches!(
+            self.status,
+            RecordingStatus::Recording | RecordingStatus::Paused | RecordingStatus::Finished
+        ) || bounds.max_x <= bounds.min_x
+            || bounds.max_y <= bounds.min_y
+        {
+            self.activity.last_export_result = Some(ExportResult::Rejected {
+                request_id: request.id,
+                reason: ExportRejection::NotExportable,
+            });
+            return CommandEffect::PublishImmediately;
+        }
+        self.activity.export = ExportState::PreparingSnapshot {
+            request_id: request.id,
+        };
+        self.activity.last_export_result = None;
+        self.active_export = Some(request);
+        CommandEffect::PublishImmediately
+    }
+
+    /// Starts preparation or consumes a completion without ever joining a worker.
+    fn poll_export(&mut self) -> bool {
+        if matches!(self.activity.export, ExportState::PreparingSnapshot { .. }) {
+            self.drain_pending_samples();
+            self.commit_finished();
+            self.sync_live_overlays();
+            let request = self
+                .active_export
+                .as_ref()
+                .expect("preparing export has request")
+                .clone();
+            let snapshot = super::export_snapshot::ExportSnapshot {
+                request_id: request.id,
+                sequence: self.sequence,
+                generation: self.generation,
+                bounds: self.canvas.session_desktop_bounds,
+                tile_size: self.canvas.sparse_tiles.tile_size,
+                tiles: self
+                    .canvas
+                    .sparse_tiles
+                    .tiles
+                    .iter()
+                    .map(|(c, t)| (*c, Arc::from(t.pixels.clone())))
+                    .collect(),
+                active_path: self.canvas.active_movement_overlay.clone(),
+                active_dwell: self.canvas.active_dwell_overlay.clone(),
+                background: self.canvas.background.clone(),
+                topology: self.canvas.effective_topology.clone(),
+                topology_history: self.canvas.topology_history.clone(),
+                statistics: self.statistics.clone(),
+                application_colors: self.settings.application_colors.clone(),
+                captured_at: std::time::SystemTime::now(),
+            };
+            self.export_rx = Some(super::export_worker::spawn(snapshot, request.clone()));
+            self.activity.export = ExportState::Exporting {
+                request_id: request.id,
+            };
+            return true;
+        }
+        let result = self.export_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(v) => Some(v),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.active_export.clone().map(|r| ExportResult::Failure {
+                    request_id: r.id,
+                    error: "export worker disconnected".into(),
+                    retry_request: r,
+                })
+            }
+        });
+        if let Some(result) = result {
+            let active_id = self.active_export.as_ref().map(|r| r.id);
+            let result_id = match &result {
+                ExportResult::Success { request_id, .. }
+                | ExportResult::Failure { request_id, .. }
+                | ExportResult::Rejected { request_id, .. } => *request_id,
+            };
+            if active_id != Some(result_id) {
+                tracing::warn!("ignored stale export result");
+                return false;
+            }
+            self.activity.export = match &result {
+                ExportResult::Success { request_id, .. } => ExportState::Succeeded {
+                    request_id: *request_id,
+                },
+                _ => ExportState::Failed {
+                    request_id: result_id,
+                },
+            };
+            self.activity.last_export_result = Some(result);
+            self.export_rx = None;
+            self.active_export = None;
+            return true;
+        }
+        false
     }
     fn stop_sampler(&mut self) {
         self.sample_rx = None;
@@ -540,7 +662,7 @@ impl RecordingEngine {
                 self.generation += 1;
                 self.full_snapshot = true
             }
-            EngineCommand::RequestExport(_) => {}
+            EngineCommand::RequestExport(request) => return self.request_export(request),
             EngineCommand::RequestRecoveryCheckpoint => {}
             EngineCommand::PrepareShutdown(request, result_tx) => {
                 self.shutting_down = true;
@@ -893,7 +1015,7 @@ impl RecordingEngine {
             sampler_observed: self.statistics.observed_samples,
             classifier_delivered: self.statistics.samples_recorded,
             samples_coalesced: 0,
-            activity: EngineActivity::default(),
+            activity: self.activity.clone(),
             status_messages: self.status_messages.clone(),
             errors: self.errors.clone(),
             sequence: self.sequence,
