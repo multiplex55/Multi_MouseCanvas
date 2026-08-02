@@ -38,6 +38,8 @@ pub struct AppState {
     pub active_display_profile: Option<ImmutableDisplayProfileSnapshot>,
     pub automatic_start_pending: bool,
     pub retry_engine_requested: bool,
+    pub identify_monitors_requested: bool,
+    pub monitor_identification_status: Option<String>,
     pub(crate) engine_commands: Vec<EngineCommand>,
 }
 impl Default for AppState {
@@ -71,6 +73,8 @@ impl Default for AppState {
             active_display_profile: None,
             automatic_start_pending: false,
             retry_engine_requested: false,
+            identify_monitors_requested: false,
+            monitor_identification_status: None,
             engine_commands: vec![],
         }
     }
