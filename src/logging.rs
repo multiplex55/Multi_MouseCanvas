@@ -217,10 +217,7 @@ mod tests {
         }
         assert_eq!(fs::read(&p).unwrap(), b"fff");
         for (n, x) in [(1, b'e'), (2, b'd'), (3, b'c'), (4, b'b')] {
-            assert_eq!(
-                fs::read(generation(&p, n)).unwrap(),
-                vec![x; x as usize * 0 + 3]
-            );
+            assert_eq!(fs::read(generation(&p, n)).unwrap(), vec![x; 3]);
         }
     }
     #[test]

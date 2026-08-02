@@ -26,7 +26,8 @@ pub fn action_policy(
     let available = connected && !shutting_down && !pending;
     ActionPolicy {
         start: Action {
-            enabled: available && status == RecordingStatus::Stopped,
+            enabled: available
+                && matches!(status, RecordingStatus::Stopped | RecordingStatus::Finished),
             label: if pending { "Starting…" } else { "Start" },
         },
         pause_resume: Action {
@@ -65,7 +66,7 @@ pub fn action_policy(
             label: "Profiles",
         },
         edit_settings: Action {
-            enabled: available,
+            enabled: available && status != RecordingStatus::Paused,
             label: "Settings",
         },
     }
@@ -85,8 +86,11 @@ mod tests {
         );
         let paused = action_policy(RecordingStatus::Paused, false, false, true, true, false);
         assert_eq!(paused.pause_resume.label, "Resume");
+        assert!(paused.export.enabled && paused.finish.enabled);
+        assert!(!paused.clear.enabled && !paused.edit_profiles.enabled);
+        assert!(!paused.edit_settings.enabled);
         let finished = action_policy(RecordingStatus::Finished, false, false, true, true, false);
-        assert!(finished.export.enabled && finished.clear.enabled && !finished.start.enabled);
+        assert!(finished.export.enabled && finished.clear.enabled && finished.start.enabled);
     }
     #[test]
     fn pending_disables_every_mutating_or_export_action() {

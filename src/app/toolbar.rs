@@ -5,7 +5,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         let policy = crate::app::action_policy::action_policy(
             state.recording_status,
             state.pending_transition.is_some(),
-            state.export_busy,
+            state.export_busy(),
             !state.preview.is_empty(),
             state.capture_health.as_ref().is_none_or(|h| {
                 h.engine == crate::session::snapshot::EngineConnectionState::Connected

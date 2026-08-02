@@ -39,10 +39,12 @@ pub struct AppState {
     pub pending_settings_save: Option<Instant>,
     pub lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState,
     pub performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics,
-    pub export_busy: bool,
+    /// Read-only mirror of activity confirmed by the engine.
+    pub engine_activity: crate::session::snapshot::EngineActivity,
     pub export_result: Option<crate::session::events::ExportResult>,
     pub export_error: Option<String>,
     pub export_start_new: Option<crate::session::events::ExportRequestId>,
+    pub pending_export_requests: std::collections::HashSet<crate::session::events::ExportRequestId>,
     pub start_after_clear: bool,
     pub display_profiles: crate::display_profiles::DisplayProfileStore,
     pub display_profiles_path: Option<PathBuf>,
@@ -79,10 +81,15 @@ impl Default for AppState {
             pending_settings_save: None,
             lifecycle_dialogs: Default::default(),
             performance_diagnostics: Default::default(),
-            export_busy: false,
+            engine_activity: crate::session::snapshot::EngineActivity {
+                export: crate::session::snapshot::ExportState::Idle,
+                last_export_result: None,
+                recovery_in_progress: false,
+            },
             export_result: None,
             export_error: None,
             export_start_new: None,
+            pending_export_requests: Default::default(),
             start_after_clear: false,
             display_profiles: Default::default(),
             display_profiles_path: None,
@@ -97,6 +104,10 @@ impl Default for AppState {
     }
 }
 impl AppState {
+    pub fn export_busy(&self) -> bool {
+        self.engine_activity.export_in_progress()
+    }
+
     pub fn load() -> Self {
         let mut s = Self::default();
         if let Ok(path) = storage::default_settings_path() {
@@ -129,6 +140,9 @@ impl AppState {
         self.preview.canvas()
     }
     pub fn queue(&mut self, c: EngineCommand) {
+        if let EngineCommand::RequestExport(request) = &c {
+            self.pending_export_requests.insert(request.id);
+        }
         self.engine_commands.push(c)
     }
     pub fn queue_transition(
@@ -238,10 +252,7 @@ impl AppState {
         self.queue(EngineCommand::RequestExport(request));
     }
     pub fn request_start_recording(&mut self) {
-        if self.recording_status == RecordingStatus::Finished
-            && self.has_unexported_canvas
-            && !self.preview.is_empty()
-        {
+        if self.recording_status == RecordingStatus::Finished {
             self.pending_new_session_decision = true;
             return;
         }
@@ -249,6 +260,28 @@ impl AppState {
     }
     pub fn apply_command(&mut self, c: crate::app::commands::AppCommand) {
         use crate::app::commands::AppCommand::*;
+        let policy = crate::app::action_policy::action_policy(
+            self.recording_status,
+            self.pending_transition.is_some(),
+            self.export_busy(),
+            !self.preview.is_empty(),
+            self.capture_health.as_ref().is_none_or(|health| {
+                health.engine == crate::session::snapshot::EngineConnectionState::Connected
+            }),
+            false,
+        );
+        let allowed = match c {
+            StartRecording => policy.start.enabled,
+            PauseRecording | ResumeRecording | TogglePauseResume => policy.pause_resume.enabled,
+            FinishSession => policy.finish.enabled,
+            ExportCurrentCanvas => policy.export.enabled,
+            Show | MinimizeToTray | Exit | ExitFromTray => true,
+        };
+        if !allowed {
+            self.status_message =
+                Some("That action is not available in the confirmed engine state.".into());
+            return;
+        }
         match c {
             StartRecording => self.request_start_recording(),
             PauseRecording => self.queue_transition(

@@ -32,7 +32,7 @@ pub fn show(
     state: &mut AppState,
     lifecycle: &mut crate::app::lifecycle::LifecycleCoordinator,
 ) {
-    if state.export_busy {
+    if state.export_busy() {
         egui::Window::new("Exporting")
             .collapsible(false)
             .show(ctx, |ui| {
@@ -51,7 +51,6 @@ pub fn show(
                     .button("Preserve completed session and start new")
                     .clicked()
                 {
-                    state.queue(crate::session::events::EngineCommand::RequestRecoveryCheckpoint);
                     state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);
                 }
                 if ui.button("Export and start new").clicked() {
