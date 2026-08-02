@@ -1,7 +1,10 @@
 use super::{
     controller::{DiscontinuityReason, MovementClassifier},
     error::EngineError,
-    events::{EngineCommand, ResolvedDisplayProfile},
+    events::{
+        EngineCommand, ResolvedDisplayProfile, TransitionAcknowledgment, TransitionKind,
+        TransitionRejection, TransitionRequestId, TransitionResult,
+    },
     model::RecordingStatus,
     shutdown::{ShutdownProgress, ShutdownRequest, ShutdownResult, ShutdownTicket},
     snapshot::{
@@ -46,6 +49,7 @@ pub struct RecordingEngineHandle {
     high_tx: SyncSender<EngineCommand>,
     normal_tx: SyncSender<EngineCommand>,
     pub snapshot_rx: Receiver<SessionSnapshot>,
+    pub acknowledgment_rx: Receiver<TransitionAcknowledgment>,
     worker: Option<JoinHandle<()>>,
     shutting_down: bool,
 }
@@ -61,17 +65,20 @@ impl RecordingEngineHandle {
         let (high_tx, high_rx) = sync_channel(32);
         let (normal_tx, normal_rx) = sync_channel(ENGINE_COMMAND_BOUND);
         let (snapshot_tx, snapshot_rx) = sync_channel(ENGINE_SNAPSHOT_BOUND);
+        let (acknowledgment_tx, acknowledgment_rx) = channel();
         let worker = thread::spawn(move || {
             RecordingEngine::new_with_factory(settings, foreground, factory).run(
                 high_rx,
                 normal_rx,
                 snapshot_tx,
+                acknowledgment_tx,
             )
         });
         Self {
             high_tx,
             normal_tx,
             snapshot_rx,
+            acknowledgment_rx,
             worker: Some(worker),
             shutting_down: false,
         }
@@ -176,6 +183,7 @@ pub struct RecordingEngine {
     profile: Option<crate::display_profiles::ImmutableDisplayProfileSnapshot>,
     excluded: bool,
     last_observed_at: Option<Instant>,
+    full_state_request_id: Option<super::events::FullStateRequestId>,
 }
 impl RecordingEngine {
     pub fn new(settings: AppSettings, fg: Option<Box<dyn ForegroundResolver>>) -> Self {
@@ -230,6 +238,7 @@ impl RecordingEngine {
             profile: None,
             excluded: false,
             last_observed_at: None,
+            full_state_request_id: None,
         }
     }
     fn run(
@@ -237,26 +246,39 @@ impl RecordingEngine {
         high: Receiver<EngineCommand>,
         normal: Receiver<EngineCommand>,
         snapshots: SyncSender<SessionSnapshot>,
+        acknowledgments: std::sync::mpsc::Sender<TransitionAcknowledgment>,
     ) {
         loop {
             while let Ok(c) = high.try_recv() {
-                if self.apply(c) {
-                    self.publish(&snapshots, true);
-                    return;
+                match self.apply(c, &acknowledgments) {
+                    CommandEffect::None => {}
+                    CommandEffect::PublishImmediately => self.publish(&snapshots, true),
+                    CommandEffect::TerminateAfterPublish => {
+                        self.publish(&snapshots, true);
+                        return;
+                    }
                 }
             }
             if let Ok(c) = normal.try_recv() {
-                if self.apply(c) {
-                    self.publish(&snapshots, true);
-                    return;
+                match self.apply(c, &acknowledgments) {
+                    CommandEffect::None => {}
+                    CommandEffect::PublishImmediately => self.publish(&snapshots, true),
+                    CommandEffect::TerminateAfterPublish => {
+                        self.publish(&snapshots, true);
+                        return;
+                    }
                 }
             };
             let mut handled = 0;
             while handled < SAMPLE_BATCH {
                 while let Ok(c) = high.try_recv() {
-                    if self.apply(c) {
-                        self.publish(&snapshots, true);
-                        return;
+                    match self.apply(c, &acknowledgments) {
+                        CommandEffect::None => {}
+                        CommandEffect::PublishImmediately => self.publish(&snapshots, true),
+                        CommandEffect::TerminateAfterPublish => {
+                            self.publish(&snapshots, true);
+                            return;
+                        }
                     }
                 }
                 let next = self.sample_rx.as_ref().and_then(|r| r.try_recv().ok());
@@ -289,62 +311,164 @@ impl RecordingEngine {
             s.stop();
         }
     }
-    fn apply(&mut self, cmd: EngineCommand) -> bool {
+    fn apply(
+        &mut self,
+        cmd: EngineCommand,
+        acknowledgments: &std::sync::mpsc::Sender<TransitionAcknowledgment>,
+    ) -> CommandEffect {
+        let lifecycle_command = lifecycle_identity(&cmd).is_some();
         if self.shutting_down
             && !matches!(
                 cmd,
                 EngineCommand::ForceShutdown
                     | EngineCommand::PrepareShutdown(..)
                     | EngineCommand::RequestSnapshot
+                    | EngineCommand::RequireFullState(_)
             )
         {
             self.status_messages
                 .push("Command rejected: engine shutdown is in progress.".into());
-            return false;
+            if let Some((id, kind)) = lifecycle_identity(&cmd) {
+                let _ = acknowledgments.send(TransitionAcknowledgment {
+                    request_id: id,
+                    kind,
+                    status: self.status,
+                    result: TransitionResult::Rejected(TransitionRejection::ShutdownInProgress),
+                });
+            }
+            return CommandEffect::PublishImmediately;
         }
         match cmd {
-            EngineCommand::Start(ResolvedDisplayProfile {
-                settings,
-                detected_topology,
-                effective_topology,
-                profile,
-            }) => {
+            EngineCommand::Start(request) => {
+                let id = request.id;
+                let ResolvedDisplayProfile {
+                    settings,
+                    detected_topology,
+                    effective_topology,
+                    profile,
+                } = request.data;
+                if self.status != RecordingStatus::Stopped {
+                    return self.reject(
+                        id,
+                        TransitionKind::Start,
+                        TransitionRejection::WrongCurrentState {
+                            current: self.status,
+                        },
+                        acknowledgments,
+                    );
+                }
+                if effective_topology.monitors.is_empty() {
+                    return self.reject(
+                        id,
+                        TransitionKind::Start,
+                        TransitionRejection::EmptyEffectiveTopology,
+                        acknowledgments,
+                    );
+                }
                 self.generation += 1;
                 self.settings = (*settings).clone();
                 self.detected_topology = detected_topology;
+                self.canvas = CanvasModel::default();
+                self.canvas.session_desktop_bounds = effective_topology
+                    .bounds()
+                    .expect("nonempty topology was validated");
                 self.canvas.current_topology = effective_topology;
+                self.canvas.refresh_dimensions();
                 self.profile = Some(profile);
                 self.excluded = false;
                 self.classifier = MovementClassifier::new(&self.settings);
+                self.statistics.reset();
+                self.current_foreground = ForegroundApplication::unknown();
+                self.last_foreground_check = None;
+                self.last_observed_at = None;
+                self.force_discontinuity = true;
+                self.sent_revisions.clear();
+                self.removed.clear();
                 self.status = RecordingStatus::Recording;
                 self.full_snapshot = true;
                 self.start_sampler();
-                self.status_messages.push("Recording started.".into())
+                self.status_messages.push("Recording started.".into());
+                self.ack(id, TransitionKind::Start, acknowledgments)
             }
-            EngineCommand::Pause => {
+            EngineCommand::Pause(request) => {
+                if self.status != RecordingStatus::Recording {
+                    return self.reject(
+                        request.id,
+                        TransitionKind::Pause,
+                        TransitionRejection::WrongCurrentState {
+                            current: self.status,
+                        },
+                        acknowledgments,
+                    );
+                }
+                self.drain_pending_samples();
                 self.flush_all(DiscontinuityReason::PauseResume);
                 self.stop_sampler();
-                self.status = RecordingStatus::Paused
+                self.status = RecordingStatus::Paused;
+                self.ack(request.id, TransitionKind::Pause, acknowledgments)
             }
-            EngineCommand::Resume => {
+            EngineCommand::Resume(request) => {
+                if self.status != RecordingStatus::Paused {
+                    return self.reject(
+                        request.id,
+                        TransitionKind::Resume,
+                        TransitionRejection::WrongCurrentState {
+                            current: self.status,
+                        },
+                        acknowledgments,
+                    );
+                }
                 self.flush_all(DiscontinuityReason::PauseResume);
                 self.force_discontinuity = true;
                 self.start_sampler();
-                self.status = RecordingStatus::Recording
+                self.status = RecordingStatus::Recording;
+                self.ack(request.id, TransitionKind::Resume, acknowledgments)
             }
-            EngineCommand::Finish => {
+            EngineCommand::Finish(request) => {
+                if !matches!(
+                    self.status,
+                    RecordingStatus::Recording | RecordingStatus::Paused
+                ) {
+                    return self.reject(
+                        request.id,
+                        TransitionKind::Finish,
+                        TransitionRejection::WrongCurrentState {
+                            current: self.status,
+                        },
+                        acknowledgments,
+                    );
+                }
+                self.drain_pending_samples();
                 self.stop_sampler();
                 self.flush_all(DiscontinuityReason::PauseResume);
-                self.status = RecordingStatus::Stopped
+                self.canvas.active_movement_overlay = None;
+                self.canvas.active_dwell_overlay = None;
+                self.status = RecordingStatus::Finished;
+                self.ack(request.id, TransitionKind::Finish, acknowledgments)
             }
-            EngineCommand::Clear => {
+            EngineCommand::Clear(request) => {
+                if !matches!(
+                    self.status,
+                    RecordingStatus::Stopped | RecordingStatus::Finished
+                ) {
+                    return self.reject(
+                        request.id,
+                        TransitionKind::Clear,
+                        TransitionRejection::WrongCurrentState {
+                            current: self.status,
+                        },
+                        acknowledgments,
+                    );
+                }
                 self.removed
                     .extend(self.canvas.sparse_tiles.tiles.keys().copied());
                 self.canvas.clear();
                 self.statistics.reset();
                 self.generation += 1;
                 self.sent_revisions.clear();
-                self.full_snapshot = true
+                self.full_snapshot = true;
+                self.status = RecordingStatus::Stopped;
+                self.ack(request.id, TransitionKind::Clear, acknowledgments)
             }
             EngineCommand::UpdateRecordingParameters(s) => {
                 let restart = self.status == RecordingStatus::Recording
@@ -374,6 +498,12 @@ impl RecordingEngine {
             EngineCommand::RequestSnapshot => {
                 self.full_snapshot = true;
                 self.deduper.clear()
+            }
+            EngineCommand::RequireFullState(id) => {
+                self.full_state_request_id = Some(id);
+                self.full_snapshot = true;
+                self.deduper.clear();
+                return CommandEffect::PublishImmediately;
             }
             EngineCommand::RestoreStoppedSession(_) => {
                 self.stop_sampler();
@@ -431,16 +561,48 @@ impl RecordingEngine {
                     }
                 };
                 let _ = result_tx.send(result);
-                return true;
+                return CommandEffect::TerminateAfterPublish;
             }
             EngineCommand::ForceShutdown => {
                 self.shutting_down = true;
                 self.stop_sampler();
                 self.flush_all(DiscontinuityReason::PauseResume);
-                return true;
+                return CommandEffect::TerminateAfterPublish;
             }
         }
-        false
+        if lifecycle_command {
+            CommandEffect::PublishImmediately
+        } else {
+            CommandEffect::None
+        }
+    }
+    fn ack(
+        &self,
+        id: TransitionRequestId,
+        kind: TransitionKind,
+        tx: &std::sync::mpsc::Sender<TransitionAcknowledgment>,
+    ) {
+        let _ = tx.send(TransitionAcknowledgment {
+            request_id: id,
+            kind,
+            status: self.status,
+            result: TransitionResult::Success,
+        });
+    }
+    fn reject(
+        &self,
+        id: TransitionRequestId,
+        kind: TransitionKind,
+        reason: TransitionRejection,
+        tx: &std::sync::mpsc::Sender<TransitionAcknowledgment>,
+    ) -> CommandEffect {
+        let _ = tx.send(TransitionAcknowledgment {
+            request_id: id,
+            kind,
+            status: self.status,
+            result: TransitionResult::Rejected(reason),
+        });
+        CommandEffect::PublishImmediately
     }
     fn accept_sample(&mut self, s: CursorSample) {
         self.statistics.observed_samples += 1;
@@ -499,6 +661,15 @@ impl RecordingEngine {
         self.classifier.accept_sample(s);
         self.statistics.current_dwell_duration = self.classifier.current_dwell_duration();
         self.sync_live_overlays();
+    }
+    fn drain_pending_samples(&mut self) {
+        loop {
+            let sample = self.sample_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+            match sample {
+                Some(sample) => self.accept_sample(sample),
+                None => break,
+            }
+        }
     }
     fn resolve_foreground_bounded(&mut self) {
         let now = (self.monotonic_now)();
@@ -661,6 +832,7 @@ impl RecordingEngine {
             .map(|d| (d.coordinate, d.revision))
             .collect();
         let snap = SessionSnapshot {
+            full_state_request_id: self.full_state_request_id,
             capture_health: CaptureHealth {
                 engine: EngineConnectionState::Connected,
                 sampler: if self.sampler.is_some() {
@@ -703,7 +875,29 @@ impl RecordingEngine {
             }
             self.removed.clear();
             self.full_snapshot = false;
-            self.last_publish = Some(now)
+            self.last_publish = Some(now);
+            self.full_state_request_id = None
+        } else {
+            // `should_send` prepares the deduplication key. A full queue did
+            // not deliver it, so allow the exact state to be attempted again.
+            self.deduper.clear();
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandEffect {
+    None,
+    PublishImmediately,
+    TerminateAfterPublish,
+}
+fn lifecycle_identity(c: &EngineCommand) -> Option<(TransitionRequestId, TransitionKind)> {
+    Some(match c {
+        EngineCommand::Start(r) => (r.id, TransitionKind::Start),
+        EngineCommand::Pause(r) => (r.id, TransitionKind::Pause),
+        EngineCommand::Resume(r) => (r.id, TransitionKind::Resume),
+        EngineCommand::Finish(r) => (r.id, TransitionKind::Finish),
+        EngineCommand::Clear(r) => (r.id, TransitionKind::Clear),
+        _ => return None,
+    })
 }

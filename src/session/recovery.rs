@@ -166,12 +166,17 @@ pub fn save_session_with_failpoint(
 
 pub fn load_session(dir: &Path) -> io::Result<(SessionManifest, SparseTileStore)> {
     let bytes = fs::read(dir.join(MANIFEST_FILENAME))?;
-    let manifest: SessionManifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let mut manifest: SessionManifest = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if manifest.schema_version != RECOVERY_SCHEMA_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported recovery schema {}", manifest.schema_version),
         ));
+    }
+    // `completed` predates `Finished` and is reliable persisted evidence that
+    // the stopped sampler belongs to a finalized, retained session.
+    if manifest.completed && manifest.recording_status == RecordingStatus::Stopped {
+        manifest.recording_status = RecordingStatus::Finished;
     }
     let mut store = SparseTileStore {
         tile_size: manifest.tile_size,
@@ -229,7 +234,11 @@ pub fn import_legacy(legacy_path: &Path, session_dir: &Path, session_id: String)
         SystemTime::UNIX_EPOCH,
         legacy.saved_at,
         legacy.completed,
-        RecordingStatus::Stopped,
+        if legacy.completed {
+            RecordingStatus::Finished
+        } else {
+            RecordingStatus::Stopped
+        },
         &canvas,
         legacy.statistics,
         legacy.application_colors,

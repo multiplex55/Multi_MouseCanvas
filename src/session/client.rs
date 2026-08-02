@@ -24,6 +24,15 @@ impl RecordingEngineClient {
             Err(TryRecvError::Disconnected) => Err(SubmitError::Disconnected),
         }
     }
+    pub fn try_acknowledgment(
+        &self,
+    ) -> Result<Option<super::events::TransitionAcknowledgment>, SubmitError> {
+        match self.handle.acknowledgment_rx.try_recv() {
+            Ok(v) => Ok(Some(v)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(SubmitError::Disconnected),
+        }
+    }
     pub fn begin_orderly_shutdown(
         &mut self,
         request: super::shutdown::ShutdownRequest,

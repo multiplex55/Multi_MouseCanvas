@@ -1,3 +1,4 @@
+pub mod action_policy;
 pub mod application_editor;
 pub mod commands;
 pub mod dialogs;
@@ -255,12 +256,14 @@ impl MultiMouseCanvasApp {
                 effective_topology: profile.effective_topology.clone(),
                 profile: std::sync::Arc::new(profile.clone()),
             };
-            if self.engine.submit(
-                &mut self.state,
-                crate::session::events::EngineCommand::Start(resolved),
-            ) {
-                self.state.active_display_profile = Some(std::sync::Arc::new(profile))
-            }
+            self.state.queue_transition(
+                crate::session::events::EngineCommand::Start(
+                    crate::session::events::TransitionRequest::new(resolved),
+                ),
+                crate::session::events::TransitionKind::Start,
+                crate::session::model::RecordingStatus::Recording,
+            );
+            self.state.active_display_profile = Some(std::sync::Arc::new(profile));
         } else {
             self.state.monitor_selection = Some(
                 crate::app::monitor_selection::MonitorSelectionState::new(detected),

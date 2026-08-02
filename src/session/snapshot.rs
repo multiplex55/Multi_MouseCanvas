@@ -47,6 +47,7 @@ pub struct EngineActivity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshot {
+    pub full_state_request_id: Option<crate::session::events::FullStateRequestId>,
     pub capture_health: CaptureHealth,
     pub recording_status: RecordingStatus,
     pub session_id: Option<String>,

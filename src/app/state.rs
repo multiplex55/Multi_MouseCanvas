@@ -1,7 +1,14 @@
 use crate::{
     canvas::preview_state::PreviewState,
     display_profiles::ImmutableDisplayProfileSnapshot,
-    session::{events::EngineCommand, model::RecordingStatus, snapshot::CaptureHealth},
+    session::{
+        events::{
+            EngineCommand, FullStateRequestId, TransitionKind, TransitionRequest,
+            TransitionRequestId,
+        },
+        model::RecordingStatus,
+        snapshot::CaptureHealth,
+    },
     settings::{model::AppSettings, storage},
 };
 use std::{
@@ -16,6 +23,9 @@ pub struct AppState {
     pub settings: AppSettings,
     pub status_message: Option<String>,
     pub persistent_engine_error: Option<String>,
+    pub pending_transition: Option<PendingTransition>,
+    pub retry_transition: Option<EngineCommand>,
+    pub resynchronization: Option<FullStateRequestId>,
     pub capture_health: Option<CaptureHealth>,
     pub snapshot_received_at: Option<Instant>,
     pub has_unexported_canvas: bool,
@@ -32,6 +42,7 @@ pub struct AppState {
     pub export_busy: bool,
     pub export_progress: f32,
     pub export_start_new: bool,
+    pub start_after_clear: bool,
     pub display_profiles: crate::display_profiles::DisplayProfileStore,
     pub display_profiles_path: Option<PathBuf>,
     pub monitor_selection: Option<crate::app::monitor_selection::MonitorSelectionState>,
@@ -51,6 +62,9 @@ impl Default for AppState {
             settings: Default::default(),
             status_message: None,
             persistent_engine_error: None,
+            pending_transition: None,
+            retry_transition: None,
+            resynchronization: None,
             capture_health: None,
             snapshot_received_at: None,
             has_unexported_canvas: false,
@@ -67,6 +81,7 @@ impl Default for AppState {
             export_busy: false,
             export_progress: 0.0,
             export_start_new: false,
+            start_after_clear: false,
             display_profiles: Default::default(),
             display_profiles_path: None,
             monitor_selection: None,
@@ -114,6 +129,32 @@ impl AppState {
     pub fn queue(&mut self, c: EngineCommand) {
         self.engine_commands.push(c)
     }
+    pub fn queue_transition(
+        &mut self,
+        command: EngineCommand,
+        kind: TransitionKind,
+        expected_status: RecordingStatus,
+    ) {
+        if self.pending_transition.is_some() {
+            return;
+        }
+        let request_id = match &command {
+            EngineCommand::Start(r) => r.id,
+            EngineCommand::Pause(r) => r.id,
+            EngineCommand::Resume(r) => r.id,
+            EngineCommand::Finish(r) => r.id,
+            EngineCommand::Clear(r) => r.id,
+            _ => return,
+        };
+        self.retry_transition = Some(command.clone());
+        self.pending_transition = Some(PendingTransition {
+            request_id,
+            kind,
+            submitted_at: Instant::now(),
+            expected_status,
+        });
+        self.queue(command);
+    }
     pub fn schedule_settings_save(&mut self) {
         self.pending_settings_save = Some(Instant::now() + Duration::from_millis(350))
     }
@@ -146,7 +187,11 @@ impl AppState {
                 Some("Pause or finish recording before clearing the canvas.".into());
             return;
         }
-        self.queue(EngineCommand::Clear);
+        self.queue_transition(
+            EngineCommand::Clear(TransitionRequest::new(())),
+            TransitionKind::Clear,
+            RecordingStatus::Stopped,
+        );
         self.lifecycle_dialogs.clear_confirmation_open = false
     }
     pub fn apply_settings_update(&mut self, u: SettingsUpdate) {
@@ -174,8 +219,12 @@ impl AppState {
         self.pending_new_session_decision = false;
         match o {
             crate::app::commands::NewSessionOutcome::ClearPreviousCanvas => {
-                self.queue(EngineCommand::Clear);
-                self.request_start_recording()
+                self.start_after_clear = true;
+                self.queue_transition(
+                    EngineCommand::Clear(TransitionRequest::new(())),
+                    TransitionKind::Clear,
+                    RecordingStatus::Stopped,
+                );
             }
             crate::app::commands::NewSessionOutcome::PreserveForExport
             | crate::app::commands::NewSessionOutcome::Cancel => {}
@@ -188,7 +237,7 @@ impl AppState {
         self.export_start_new = true
     }
     pub fn request_start_recording(&mut self) {
-        if self.recording_status == RecordingStatus::Stopped
+        if self.recording_status == RecordingStatus::Finished
             && self.has_unexported_canvas
             && !self.preview.is_empty()
         {
@@ -201,14 +250,37 @@ impl AppState {
         use crate::app::commands::AppCommand::*;
         match c {
             StartRecording => self.request_start_recording(),
-            PauseRecording => self.queue(EngineCommand::Pause),
-            ResumeRecording => self.queue(EngineCommand::Resume),
-            TogglePauseResume => self.queue(if self.recording_status == RecordingStatus::Paused {
-                EngineCommand::Resume
-            } else {
-                EngineCommand::Pause
-            }),
-            FinishSession => self.queue(EngineCommand::Finish),
+            PauseRecording => self.queue_transition(
+                EngineCommand::Pause(TransitionRequest::new(())),
+                TransitionKind::Pause,
+                RecordingStatus::Paused,
+            ),
+            ResumeRecording => self.queue_transition(
+                EngineCommand::Resume(TransitionRequest::new(())),
+                TransitionKind::Resume,
+                RecordingStatus::Recording,
+            ),
+            TogglePauseResume => {
+                let (c, k, s) = if self.recording_status == RecordingStatus::Paused {
+                    (
+                        EngineCommand::Resume(TransitionRequest::new(())),
+                        TransitionKind::Resume,
+                        RecordingStatus::Recording,
+                    )
+                } else {
+                    (
+                        EngineCommand::Pause(TransitionRequest::new(())),
+                        TransitionKind::Pause,
+                        RecordingStatus::Paused,
+                    )
+                };
+                self.queue_transition(c, k, s)
+            }
+            FinishSession => self.queue_transition(
+                EngineCommand::Finish(TransitionRequest::new(())),
+                TransitionKind::Finish,
+                RecordingStatus::Finished,
+            ),
             ExportCurrentCanvas => self.queue(EngineCommand::RequestExport(
                 self.settings.export_directory.clone(),
             )),
@@ -216,6 +288,13 @@ impl AppState {
             Show | Exit | ExitFromTray => {}
         }
     }
+}
+#[derive(Debug, Clone)]
+pub struct PendingTransition {
+    pub request_id: TransitionRequestId,
+    pub kind: TransitionKind,
+    pub submitted_at: Instant,
+    pub expected_status: RecordingStatus,
 }
 #[derive(Clone, Copy)]
 enum SettingKind {
