@@ -4,6 +4,7 @@ pub mod dialogs;
 pub mod display_profile_editor;
 pub mod engine_bridge;
 pub mod lifecycle;
+pub mod monitor_identification;
 pub mod monitor_selection;
 pub mod performance_view;
 pub mod settings_view;
@@ -25,6 +26,7 @@ pub struct MultiMouseCanvasApp {
     tray: Option<crate::tray::AppTray>,
     lifecycle: LifecycleCoordinator,
     engine: engine_bridge::EngineBridge,
+    monitor_identification: monitor_identification::MonitorIdentificationController,
 }
 
 impl MultiMouseCanvasApp {
@@ -79,12 +81,22 @@ impl MultiMouseCanvasApp {
             tray,
             lifecycle: LifecycleCoordinator::default(),
             engine,
+            monitor_identification: Default::default(),
         }
     }
 }
 
 impl eframe::App for MultiMouseCanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.state.identify_monitors_requested) {
+            self.monitor_identification.show();
+        }
+        if self
+            .monitor_identification
+            .poll(&mut self.state.monitor_identification_status)
+        {
+            ctx.request_repaint();
+        }
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
                 AppCommand::Show if !self.lifecycle.is_preparing() => self.show_window(ctx),
@@ -115,6 +127,7 @@ impl eframe::App for MultiMouseCanvasApp {
             self.request_exit(ExitSource::WindowClose);
         }
         if self.lifecycle.take_checkpoint_request() {
+            self.monitor_identification.close();
             self.state.status_message = Some("Saving recovery and exiting…".into());
             self.state.prepare_shutdown_checkpoint();
             self.lifecycle.checkpoint_complete(Ok(()));
@@ -132,9 +145,13 @@ impl eframe::App for MultiMouseCanvasApp {
             tray.update(&self.state, &self.lifecycle);
         }
         view::show(ctx, &mut self.state, &mut self.lifecycle);
+        if self.monitor_identification.is_pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.monitor_identification.shutdown();
         self.engine.shutdown();
         self.state.save_settings_as_status();
         tracing::info!("GUI shutdown cleanup complete");

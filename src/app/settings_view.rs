@@ -5,6 +5,13 @@ use crate::{
 use eframe::egui;
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     ui.collapsing("Display Profiles", |ui| {
+        if ui.button("Identify monitors").clicked() {
+            state.identify_monitors_requested = true;
+            state.monitor_identification_status = Some("Identifying monitors…".into());
+        }
+        if let Some(status) = &state.monitor_identification_status {
+            ui.label(status);
+        }
         crate::app::display_profile_editor::show(ui, state)
     });
     ui.collapsing("Recording", |ui| {
