@@ -39,7 +39,7 @@ pub fn show(
                 ui.label(
                     "Compositing full session tiles on a worker thread. Recording remains active.",
                 );
-                ui.add(egui::ProgressBar::new(state.export_progress).animate(true));
+                ui.spinner();
             });
     }
     if state.pending_new_session_decision {

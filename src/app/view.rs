@@ -29,6 +29,22 @@ pub fn show(
                 state.retry_engine_requested = true;
             }
         }
+        if let Some(error) = state.export_error.clone() {
+            ui.colored_label(egui::Color32::RED, format!("Export failed: {error}"));
+            if ui.button("Retry export").clicked() {
+                state.retry_export();
+            }
+        }
+        if let Some(crate::session::events::ExportResult::Success { path, .. }) =
+            state.export_result.clone()
+        {
+            ui.label(format!("Saved: {}", path.display()));
+            if ui.button("Open folder").clicked() {
+                if let Err(e) = crate::platform::open_path::open_export_location(&path) {
+                    state.export_error = Some(e.to_string());
+                }
+            }
+        }
         ui.separator();
         let stats = &state.statistics;
         ui.horizontal_wrapped(|ui| {

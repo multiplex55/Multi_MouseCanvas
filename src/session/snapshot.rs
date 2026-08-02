@@ -39,10 +39,37 @@ pub struct TileDelta {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineActivity {
-    pub export_in_progress: bool,
+    pub export: ExportState,
+    pub last_export_result: Option<crate::session::events::ExportResult>,
     pub recovery_in_progress: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExportState {
+    #[default]
+    Idle,
+    PreparingSnapshot {
+        request_id: crate::session::events::ExportRequestId,
+    },
+    Exporting {
+        request_id: crate::session::events::ExportRequestId,
+    },
+    Succeeded {
+        request_id: crate::session::events::ExportRequestId,
+    },
+    Failed {
+        request_id: crate::session::events::ExportRequestId,
+    },
+}
+impl EngineActivity {
+    pub fn export_in_progress(&self) -> bool {
+        matches!(
+            self.export,
+            ExportState::PreparingSnapshot { .. } | ExportState::Exporting { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,7 +102,7 @@ pub struct SessionSnapshot {
     pub generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SnapshotKey {
     status: RecordingStatus,
     generation: u64,

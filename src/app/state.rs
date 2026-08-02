@@ -40,8 +40,9 @@ pub struct AppState {
     pub lifecycle_dialogs: crate::app::dialogs::LifecycleDialogState,
     pub performance_diagnostics: crate::app::performance_view::PerformanceDiagnostics,
     pub export_busy: bool,
-    pub export_progress: f32,
-    pub export_start_new: bool,
+    pub export_result: Option<crate::session::events::ExportResult>,
+    pub export_error: Option<String>,
+    pub export_start_new: Option<crate::session::events::ExportRequestId>,
     pub start_after_clear: bool,
     pub display_profiles: crate::display_profiles::DisplayProfileStore,
     pub display_profiles_path: Option<PathBuf>,
@@ -79,8 +80,9 @@ impl Default for AppState {
             lifecycle_dialogs: Default::default(),
             performance_diagnostics: Default::default(),
             export_busy: false,
-            export_progress: 0.0,
-            export_start_new: false,
+            export_result: None,
+            export_error: None,
+            export_start_new: None,
             start_after_clear: false,
             display_profiles: Default::default(),
             display_profiles_path: None,
@@ -231,10 +233,9 @@ impl AppState {
         }
     }
     pub fn export_and_start_new_session(&mut self) {
-        self.queue(EngineCommand::RequestExport(
-            self.settings.export_directory.clone(),
-        ));
-        self.export_start_new = true
+        let request = self.export_request();
+        self.export_start_new = Some(request.id);
+        self.queue(EngineCommand::RequestExport(request));
     }
     pub fn request_start_recording(&mut self) {
         if self.recording_status == RecordingStatus::Finished
@@ -281,11 +282,58 @@ impl AppState {
                 TransitionKind::Finish,
                 RecordingStatus::Finished,
             ),
-            ExportCurrentCanvas => self.queue(EngineCommand::RequestExport(
-                self.settings.export_directory.clone(),
-            )),
+            ExportCurrentCanvas => {
+                let request = self.export_request();
+                self.queue(EngineCommand::RequestExport(request));
+            }
             MinimizeToTray => self.minimize_requested = true,
             Show | Exit | ExitFromTray => {}
+        }
+    }
+}
+impl AppState {
+    pub fn export_request(&self) -> crate::session::events::ExportRequest {
+        use crate::export::model::{
+            ExportBackground, ExportDestination, ExportFormat, ExportScale, InformationPanels,
+        };
+        let scale = match self.settings.export_scale {
+            v if v <= 0.375 => ExportScale::TwentyFive,
+            v if v <= 0.625 => ExportScale::Fifty,
+            v if v <= 0.875 => ExportScale::SeventyFive,
+            _ => ExportScale::Full,
+        };
+        let background = match self.settings.export_background_mode {
+            crate::settings::model::ExportBackgroundMode::Transparent => {
+                ExportBackground::Transparent
+            }
+            _ => ExportBackground::Solid(self.settings.background_color.clone()),
+        };
+        crate::session::events::ExportRequest {
+            id: crate::session::events::ExportRequestId::next(),
+            destination: ExportDestination::Directory(self.settings.export_directory.clone()),
+            format: ExportFormat::Png,
+            timestamp: std::time::SystemTime::now(),
+            scale,
+            background,
+            panels: InformationPanels {
+                monitor_outlines: self.settings.export_monitor_overlays,
+                monitor_labels: self.settings.export_monitor_overlays,
+                ..Default::default()
+            },
+        }
+    }
+    pub fn retry_export(&mut self) {
+        let retry = self.export_result.as_ref().and_then(|r| {
+            if let crate::session::events::ExportResult::Failure { retry_request, .. } = r {
+                Some(retry_request.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(mut request) = retry {
+            request.id = crate::session::events::ExportRequestId::next();
+            self.export_error = None;
+            self.queue(EngineCommand::RequestExport(request));
         }
     }
 }
