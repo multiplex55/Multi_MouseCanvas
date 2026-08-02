@@ -1,5 +1,5 @@
 use super::{
-    engine::{RecordingEngineHandle, ShutdownResult, SubmitError},
+    engine::{RecordingEngineHandle, SubmitError},
     events::EngineCommand,
     snapshot::SessionSnapshot,
 };
@@ -24,10 +24,13 @@ impl RecordingEngineClient {
             Err(TryRecvError::Disconnected) => Err(SubmitError::Disconnected),
         }
     }
-    pub fn orderly_shutdown(&mut self) -> ShutdownResult {
-        self.handle.orderly_shutdown()
+    pub fn begin_orderly_shutdown(
+        &mut self,
+        request: super::shutdown::ShutdownRequest,
+    ) -> super::shutdown::ShutdownTicket {
+        self.handle.begin_orderly_shutdown(request)
     }
-    pub fn force_shutdown(&mut self) -> ShutdownResult {
+    pub fn force_shutdown(&mut self) {
         self.handle.force_shutdown()
     }
 }

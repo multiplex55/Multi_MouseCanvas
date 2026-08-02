@@ -123,28 +123,52 @@ impl eframe::App for MultiMouseCanvasApp {
             self.minimize_to_tray(ctx);
         }
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.request_exit(ExitSource::WindowClose);
+            if !matches!(self.lifecycle.state(), LifecycleState::ReadyToClose) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.request_exit(ExitSource::WindowClose);
+            }
         }
-        if self.lifecycle.take_checkpoint_request() {
+        if matches!(self.lifecycle.state(), LifecycleState::StartingShutdown) {
             self.monitor_identification.close();
-            self.state.status_message = Some("Saving recovery and exiting…".into());
-            self.state.prepare_shutdown_checkpoint();
-            self.lifecycle.checkpoint_complete(Ok(()));
+            self.state.status_message = Some("Finalizing activity and saving recovery…".into());
+            let required = confirmation_worthy(
+                self.state.recording_status,
+                !self.state.preview.is_empty(),
+                self.state.has_unexported_canvas,
+            );
+            let ticket = self
+                .engine
+                .begin_shutdown(crate::session::shutdown::ShutdownRequest {
+                    recovery_directory: self.state.recovery_path.clone(),
+                    recovery_required: required,
+                });
+            self.lifecycle.start(ticket);
         }
-        if self.lifecycle.poll_timeout(std::time::Instant::now()) {
-            tracing::error!("shutdown-timeout: forcing shutdown after best-effort cleanup");
+        self.lifecycle.poll();
+        let now = std::time::Instant::now();
+        if self.lifecycle.deadline_reached(now) {
+            tracing::error!("five-second shutdown deadline reached");
+            self.lifecycle.force();
+        }
+        if matches!(self.lifecycle.state(), LifecycleState::ReadyToClose)
+            && !self.lifecycle.final_close_sent
+        {
+            self.lifecycle.final_close_sent = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if matches!(
             self.lifecycle.state(),
-            LifecycleState::ReadyToClose | LifecycleState::ForceExiting
+            LifecycleState::WaitingForEngineAndRecovery
         ) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.request_repaint();
         }
         if let Some(tray) = &mut self.tray {
             tray.update(&self.state, &self.lifecycle);
         }
         view::show(ctx, &mut self.state, &mut self.lifecycle);
+        if matches!(self.lifecycle.state(), LifecycleState::ForceExiting) {
+            self.force_exit();
+        }
         if self.monitor_identification.is_pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -152,7 +176,6 @@ impl eframe::App for MultiMouseCanvasApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.monitor_identification.shutdown();
-        self.engine.shutdown();
         self.state.save_settings_as_status();
         tracing::info!("GUI shutdown cleanup complete");
     }
@@ -165,7 +188,16 @@ impl MultiMouseCanvasApp {
             !self.state.preview.is_empty(),
             self.state.has_unexported_canvas,
         );
-        self.lifecycle.exit_requested(source, worthy);
+        self.lifecycle
+            .exit_requested(source, worthy, std::time::Instant::now());
+    }
+    fn force_exit(&mut self) -> ! {
+        use crate::app::lifecycle::ProcessTerminator;
+        tracing::error!("force exit: sending best-effort nonblocking shutdown signals");
+        self.engine.force_shutdown();
+        self.monitor_identification.close();
+        crate::app::lifecycle::SystemProcessTerminator.terminate(2);
+        unreachable!("the system process terminator returned")
     }
     fn show_window(&mut self, ctx: &egui::Context) {
         tracing::info!("application window shown");

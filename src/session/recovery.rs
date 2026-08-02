@@ -23,6 +23,12 @@ pub const LEGACY_FILENAME: &str = "autosave.recovery.json";
 pub const MANIFEST_FILENAME: &str = "manifest.json";
 pub const VERSION_FILENAME: &str = "recovery-version";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitStage {
+    BeforeTileCommit,
+    BeforeManifestCommit,
+}
+
 /// The old representation is retained solely as an explicit import format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyRecoveryState {
@@ -97,27 +103,65 @@ pub fn save_session(
     manifest: &SessionManifest,
     store: &mut SparseTileStore,
 ) -> io::Result<()> {
+    save_session_with_failpoint(dir, manifest, store, |_| Ok(()))
+}
+
+/// Test seam for deterministic I/O failure injection. Each stage is attempted
+/// once; checkpoint creation never retries indefinitely.
+pub fn save_session_with_failpoint(
+    dir: &Path,
+    manifest: &SessionManifest,
+    store: &mut SparseTileStore,
+    mut failpoint: impl FnMut(CommitStage) -> io::Result<()>,
+) -> io::Result<()> {
     fs::create_dir_all(dir.join("tiles"))?;
     atomic_bytes(
         &dir.join(VERSION_FILENAME),
         RECOVERY_SCHEMA_VERSION.to_string().as_bytes(),
         |_| Ok(()),
     )?;
-    let dirty = snapshot_dirty_tiles(store);
-    for (coord, revision, pixels) in dirty {
+    let replacing = dir.join(MANIFEST_FILENAME).exists();
+    let transaction = format!(
+        "checkpoint-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let tiles: Vec<_> = store
+        .tiles
+        .iter()
+        .map(|(c, t)| (*c, t.revision, t.pixels.clone()))
+        .collect();
+    let mut committed_names = Vec::new();
+    for (coord, revision, pixels) in tiles {
         let image =
             RgbaImage::from_raw(store.tile_size, store.tile_size, pixels).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "invalid RGBA tile length")
             })?;
-        let path = dir.join("tiles").join(tile_filename(coord));
+        let name = if replacing {
+            format!("{transaction}-{}", tile_filename(coord))
+        } else {
+            tile_filename(coord)
+        };
+        let path = dir.join("tiles").join(&name);
+        failpoint(CommitStage::BeforeTileCommit)?;
         atomic_png(&path, &image)?;
+        committed_names.push(name);
         if let Some(tile) = store.tiles.get_mut(&coord) {
             if tile.revision == revision {
                 tile.recovery_dirty = false;
             }
         }
     }
-    atomic_json(&dir.join(MANIFEST_FILENAME), manifest)
+    let mut committed_manifest = manifest.clone();
+    committed_manifest.tiles = committed_names;
+    failpoint(CommitStage::BeforeManifestCommit)?;
+    // The manifest is the commit record and is always replaced last. Until
+    // this rename succeeds the previous manifest and every tile it references
+    // remain untouched and loadable.
+    atomic_json(&dir.join(MANIFEST_FILENAME), &committed_manifest)
 }
 
 pub fn load_session(dir: &Path) -> io::Result<(SessionManifest, SparseTileStore)> {
@@ -200,6 +244,7 @@ fn parse_tile_filename(name: &str) -> io::Result<TileCoordinate> {
     let stem = name
         .strip_suffix(".png")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad tile name"))?;
+    let stem = stem.rsplit('-').next().unwrap_or(stem);
     let (x, y) = stem
         .split_once('_')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad tile name"))?;
@@ -368,5 +413,47 @@ mod tests {
         fs::write(&tile, "not a png").unwrap();
         assert!(load_session(d.path()).is_err());
         assert!(tile.exists());
+    }
+
+    #[test]
+    fn failed_replacement_preserves_previous_manifest_and_tiles() {
+        let d = tempdir().unwrap();
+        let mut canvas = CanvasModel::default();
+        canvas
+            .sparse_tiles
+            .put_pixel(1, 1, [9, 8, 7, 255], |a, b| a.copy_from_slice(&b));
+        let manifest = SessionManifest::checkpoint(
+            "one".into(),
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            false,
+            RecordingStatus::Stopped,
+            &canvas,
+            SessionStatistics::default(),
+            ApplicationColorRegistry::default(),
+            None,
+        );
+        save_session(d.path(), &manifest, &mut canvas.sparse_tiles).unwrap();
+        let old_manifest = fs::read(d.path().join(MANIFEST_FILENAME)).unwrap();
+        let old_loaded = load_session(d.path()).unwrap();
+        canvas
+            .sparse_tiles
+            .put_pixel(2, 2, [1, 2, 3, 255], |a, b| a.copy_from_slice(&b));
+        let error =
+            save_session_with_failpoint(d.path(), &manifest, &mut canvas.sparse_tiles, |stage| {
+                if stage == CommitStage::BeforeManifestCommit {
+                    Err(io::Error::other("injected manifest failure"))
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(error.is_err());
+        assert_eq!(
+            fs::read(d.path().join(MANIFEST_FILENAME)).unwrap(),
+            old_manifest
+        );
+        let loaded = load_session(d.path()).unwrap();
+        assert_eq!(loaded.0.session_id, old_loaded.0.session_id);
+        assert_eq!(loaded.1.tiles.len(), old_loaded.1.tiles.len());
     }
 }

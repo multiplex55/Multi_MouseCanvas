@@ -133,10 +133,6 @@ impl AppState {
             }
         }
     }
-    pub fn prepare_shutdown_checkpoint(&mut self) {
-        self.queue(EngineCommand::RequestRecoveryCheckpoint);
-        self.save_settings_as_status()
-    }
     pub fn request_clear_canvas_confirmation(&mut self) {
         self.lifecycle_dialogs
             .request_clear(!self.preview.is_empty());

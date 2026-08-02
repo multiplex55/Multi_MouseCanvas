@@ -79,14 +79,37 @@ pub fn show(
                 });
             });
     }
-    if lifecycle.is_preparing() {
+    if matches!(
+        lifecycle.state(),
+        crate::app::lifecycle::LifecycleState::StartingShutdown
+            | crate::app::lifecycle::LifecycleState::WaitingForEngineAndRecovery
+    ) {
         egui::Window::new("Saving recovery and exiting…")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label("Finalizing activity and writing an incomplete recovery checkpoint.");
                 ui.spinner();
+                let now = std::time::Instant::now();
+                ui.label(format!(
+                    "Elapsed: {:.1}s",
+                    lifecycle.elapsed(now).as_secs_f32()
+                ));
+                if lifecycle.force_visible(now) && ui.button("Force exit").clicked() {
+                    tracing::warn!("user requested force exit");
+                    lifecycle.force();
+                }
             });
+    }
+    if matches!(
+        lifecycle.state(),
+        crate::app::lifecycle::LifecycleState::RecoveryFailedAwaitingChoice
+    ) {
+        egui::Window::new("Recovery could not be saved").collapsible(false).resizable(false).show(ctx,|ui| {
+            if let Some(result)=&lifecycle.outcome { match result { crate::session::shutdown::ShutdownResult::RecoveryFailedWorkersStopped{error,previous_recovery_valid}|crate::session::shutdown::ShutdownResult::WorkerShutdownFailed{error,previous_recovery_valid}=>{ui.label(error);ui.label(if *previous_recovery_valid{"The previous valid recovery was preserved."}else{"The previous recovery could not be guaranteed valid."});},_=>{} } }
+            if ui.button("Exit anyway").clicked() && !lifecycle.exit_anyway() { lifecycle.force(); }
+            ui.label("Cancel exit is unavailable because the authoritative engine has already stopped or worker state is uncertain.");
+        });
     }
 }
 #[cfg(test)]
