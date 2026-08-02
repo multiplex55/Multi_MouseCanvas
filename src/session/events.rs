@@ -1,8 +1,10 @@
+use super::shutdown::{ShutdownRequest, ShutdownResult};
 use crate::display_profiles::DisplayProfileSnapshot;
 use crate::{
     app_colors::registry::ApplicationColorRegistry, canvas::topology::DisplayTopology,
     settings::model::AppSettings,
 };
+use std::sync::mpsc::Sender;
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,7 +15,7 @@ pub struct ResolvedDisplayProfile {
     pub profile: Arc<DisplayProfileSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum EngineCommand {
     Start(ResolvedDisplayProfile),
     Pause,
@@ -31,7 +33,7 @@ pub enum EngineCommand {
     RequestExport(PathBuf),
     RequestRecoveryCheckpoint,
     RequestSnapshot,
-    PrepareShutdown,
+    PrepareShutdown(ShutdownRequest, Sender<ShutdownResult>),
     ForceShutdown,
 }
 
@@ -41,7 +43,7 @@ impl EngineCommand {
             Self::Pause
             | Self::Finish
             | Self::Clear
-            | Self::PrepareShutdown
+            | Self::PrepareShutdown(..)
             | Self::ForceShutdown
             | Self::RequestRecoveryCheckpoint
             | Self::InvalidateTopology

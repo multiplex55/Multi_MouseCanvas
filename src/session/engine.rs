@@ -3,6 +3,7 @@ use super::{
     error::EngineError,
     events::{EngineCommand, ResolvedDisplayProfile},
     model::RecordingStatus,
+    shutdown::{ShutdownProgress, ShutdownRequest, ShutdownResult, ShutdownTicket},
     snapshot::{
         CaptureHealth, EngineActivity, EngineConnectionState, SamplerState, SessionSnapshot,
         SnapshotDeduper, TileDelta,
@@ -23,7 +24,7 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+        mpsc::{channel, sync_channel, Receiver, SyncSender, TrySendError},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -41,12 +42,6 @@ pub enum SubmitError {
     Disconnected,
     ShuttingDown,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShutdownResult {
-    Joined,
-    AlreadyStopped,
-}
-
 pub struct RecordingEngineHandle {
     high_tx: SyncSender<EngineCommand>,
     normal_tx: SyncSender<EngineCommand>,
@@ -95,30 +90,53 @@ impl RecordingEngineHandle {
             TrySendError::Disconnected(_) => SubmitError::Disconnected,
         })
     }
-    pub fn orderly_shutdown(&mut self) -> ShutdownResult {
+    pub fn begin_orderly_shutdown(&mut self, request: ShutdownRequest) -> ShutdownTicket {
+        let (progress_tx, progress_rx) = channel();
+        let (result_tx, result_rx) = channel();
         if self.worker.is_none() {
-            return ShutdownResult::AlreadyStopped;
-        };
-        self.shutting_down = true;
-        let _ = self.high_tx.send(EngineCommand::PrepareShutdown);
-        if let Some(w) = self.worker.take() {
-            let _ = w.join();
+            let _ = result_tx.send(ShutdownResult::WorkerShutdownFailed {
+                error: "engine already stopped".into(),
+                previous_recovery_valid: true,
+            });
+            return ShutdownTicket::new(progress_rx, result_rx);
         }
-        ShutdownResult::Joined
+        self.shutting_down = true;
+        let _ = progress_tx.send(ShutdownProgress::FinalizingActivity);
+        let (engine_tx, engine_rx) = channel();
+        let _ = self
+            .high_tx
+            .send(EngineCommand::PrepareShutdown(request, engine_tx));
+        let worker = self.worker.take().unwrap();
+        thread::spawn(move || {
+            let engine_result = engine_rx.recv();
+            let _ = progress_tx.send(ShutdownProgress::JoiningEngine);
+            let joined = worker.join();
+            let final_result = match (engine_result, joined) {
+                (Ok(r), Ok(())) => r,
+                (Ok(r), Err(_)) => ShutdownResult::WorkerShutdownFailed {
+                    error: "engine worker panicked".into(),
+                    previous_recovery_valid: !matches!(
+                        r,
+                        ShutdownResult::RecoverySavedAndWorkersStopped
+                    ),
+                },
+                (Err(_), _) => ShutdownResult::WorkerShutdownFailed {
+                    error: "engine stopped without acknowledging shutdown".into(),
+                    previous_recovery_valid: true,
+                },
+            };
+            let _ = result_tx.send(final_result);
+        });
+        ShutdownTicket::new(progress_rx, result_rx)
     }
-    pub fn force_shutdown(&mut self) -> ShutdownResult {
-        if self.worker.is_none() {
-            return ShutdownResult::AlreadyStopped;
-        };
+    pub fn force_shutdown(&mut self) {
         self.shutting_down = true;
         let _ = self.high_tx.try_send(EngineCommand::ForceShutdown);
         if let Some(w) = self.worker.take() {
-            let _ = w.join();
+            thread::spawn(move || {
+                let _ = w.join();
+            });
         }
-        ShutdownResult::Joined
-    }
-    pub fn shutdown(&mut self) {
-        let _ = self.orderly_shutdown();
     }
 }
 impl Drop for RecordingEngineHandle {
@@ -276,7 +294,7 @@ impl RecordingEngine {
             && !matches!(
                 cmd,
                 EngineCommand::ForceShutdown
-                    | EngineCommand::PrepareShutdown
+                    | EngineCommand::PrepareShutdown(..)
                     | EngineCommand::RequestSnapshot
             )
         {
@@ -365,7 +383,57 @@ impl RecordingEngine {
             }
             EngineCommand::RequestExport(_) => {}
             EngineCommand::RequestRecoveryCheckpoint => {}
-            EngineCommand::PrepareShutdown | EngineCommand::ForceShutdown => {
+            EngineCommand::PrepareShutdown(request, result_tx) => {
+                self.shutting_down = true;
+                self.stop_sampler();
+                self.flush_all(DiscontinuityReason::PauseResume);
+                let required = request.recovery_required
+                    || self.status != RecordingStatus::Stopped
+                    || !self.canvas.sparse_tiles.tiles.is_empty();
+                let result = if !required {
+                    ShutdownResult::NoRecoveryRequiredAndWorkersStopped
+                } else if let Some(root) = request.recovery_directory {
+                    let now = std::time::SystemTime::now();
+                    let saved = super::manifest::create_session_directory(&root, now).and_then(
+                        |(id, dir)| {
+                            let manifest = super::manifest::SessionManifest::checkpoint(
+                                id,
+                                now,
+                                now,
+                                false,
+                                self.status,
+                                &self.canvas,
+                                self.statistics.clone(),
+                                self.settings.application_colors.clone(),
+                                self.profile.as_deref().cloned(),
+                            );
+                            super::recovery::save_session(
+                                &dir,
+                                &manifest,
+                                &mut self.canvas.sparse_tiles,
+                            )
+                        },
+                    );
+                    match saved {
+                        Ok(()) => ShutdownResult::RecoverySavedAndWorkersStopped,
+                        Err(e) => {
+                            tracing::error!(error=%e, "final recovery checkpoint failed; previous recovery preserved");
+                            ShutdownResult::RecoveryFailedWorkersStopped {
+                                error: e.to_string(),
+                                previous_recovery_valid: true,
+                            }
+                        }
+                    }
+                } else {
+                    ShutdownResult::RecoveryFailedWorkersStopped {
+                        error: "recovery location is unavailable".into(),
+                        previous_recovery_valid: true,
+                    }
+                };
+                let _ = result_tx.send(result);
+                return true;
+            }
+            EngineCommand::ForceShutdown => {
                 self.shutting_down = true;
                 self.stop_sampler();
                 self.flush_all(DiscontinuityReason::PauseResume);

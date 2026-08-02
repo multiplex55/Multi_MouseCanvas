@@ -79,7 +79,16 @@ impl EngineBridge {
         });
     }
     pub fn shutdown(&mut self) {
-        self.client.orderly_shutdown();
+        self.client.force_shutdown();
+    }
+    pub fn begin_shutdown(
+        &mut self,
+        request: crate::session::shutdown::ShutdownRequest,
+    ) -> crate::session::shutdown::ShutdownTicket {
+        self.client.begin_orderly_shutdown(request)
+    }
+    pub fn force_shutdown(&mut self) {
+        self.client.force_shutdown()
     }
     pub fn retry(&mut self, state: &mut AppState) {
         self.client.force_shutdown();
