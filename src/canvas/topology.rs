@@ -143,7 +143,7 @@ impl TopologyHistory {
         if self
             .entries
             .last()
-            .is_none_or(|t| t.signature != topology.signature)
+            .is_none_or(|t| t.fingerprint != topology.fingerprint)
         {
             self.entries.push(topology);
             true

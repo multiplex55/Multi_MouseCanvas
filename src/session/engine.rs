@@ -365,15 +365,20 @@ impl RecordingEngine {
                         acknowledgments,
                     );
                 }
-                self.generation += 1;
                 self.settings = (*settings).clone();
-                self.detected_topology = detected_topology;
                 self.canvas = CanvasModel::default();
-                self.canvas.session_desktop_bounds = effective_topology
-                    .bounds()
-                    .expect("nonempty topology was validated");
-                self.canvas.current_topology = effective_topology;
-                self.canvas.refresh_dimensions();
+                if self.canvas.begin_session(effective_topology).is_err() {
+                    return self.reject(
+                        id,
+                        TransitionKind::Start,
+                        TransitionRejection::EmptyEffectiveTopology,
+                        acknowledgments,
+                    );
+                }
+                self.generation += 1;
+                self.detected_topology = detected_topology.clone();
+                self.canvas.detected_topology = detected_topology;
+                self.canvas.active_profile_monitor_keys = profile.included_stable_keys.clone();
                 self.profile = Some(profile);
                 self.excluded = false;
                 self.classifier = MovementClassifier::new(&self.settings);
@@ -487,11 +492,35 @@ impl RecordingEngine {
             }
             EngineCommand::UpdateApplicationColorRules(r) => self.settings.application_colors = r,
             EngineCommand::RefreshTopology(Some(t)) => {
-                if t.signature != self.canvas.current_topology.signature {
+                let effective = t.effective(&self.canvas.active_profile_monitor_keys);
+                let detected_changed = t.fingerprint != self.detected_topology.fingerprint;
+                let effective_changed =
+                    effective.fingerprint != self.canvas.effective_topology.fingerprint;
+                if effective_changed {
+                    self.drain_pending_samples();
                     self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
-                    self.canvas.current_topology = t;
-                    self.force_discontinuity = true
+                    self.canvas.active_movement_overlay = None;
+                    self.canvas.active_dwell_overlay = None;
+                    self.canvas.session_desktop_bounds =
+                        crate::canvas::topology::expand_session_bounds(
+                            self.canvas.session_desktop_bounds,
+                            &effective,
+                        );
+                    self.canvas
+                        .topology_history
+                        .record_if_changed(effective.clone());
+                    self.canvas.effective_topology = effective;
+                    self.canvas.refresh_dimensions();
+                    self.force_discontinuity = true;
+                    self.full_snapshot = true;
+                    self.deduper.clear();
                 }
+                if detected_changed {
+                    self.detected_topology = t.clone();
+                    self.full_snapshot = true;
+                    self.deduper.clear();
+                }
+                self.canvas.detected_topology = t;
             }
             EngineCommand::RefreshTopology(None) | EngineCommand::InvalidateTopology => {}
             EngineCommand::SetUiVisibility(v) => self.ui_visible = v,
@@ -620,7 +649,7 @@ impl RecordingEngine {
         if self.detected_topology.monitor_containing(point).is_some()
             && self
                 .canvas
-                .current_topology
+                .effective_topology
                 .monitor_containing(point)
                 .is_none()
         {
@@ -849,16 +878,17 @@ impl RecordingEngine {
             recording_status: self.status,
             session_id: None,
             detected_topology: self.detected_topology.clone(),
-            effective_topology: self.canvas.current_topology.clone(),
+            effective_topology: self.canvas.effective_topology.clone(),
             session_bounds: self.canvas.session_desktop_bounds,
+            topology_history: self.canvas.topology_history.clone(),
             profile: self.profile.clone(),
             tile_deltas: deltas,
             full_tile_snapshot: self.full_snapshot,
             active_path_overlay: self.canvas.active_movement_overlay.clone(),
             active_dwell_overlay: self.canvas.active_dwell_overlay.clone(),
             changed_tile_revisions: revisions,
-            current_topology: self.canvas.current_topology.clone(),
-            session_topology: self.canvas.current_topology.clone(),
+            current_topology: self.canvas.effective_topology.clone(),
+            session_topology: self.canvas.effective_topology.clone(),
             statistics: self.statistics.clone(),
             sampler_observed: self.statistics.observed_samples,
             classifier_delivered: self.statistics.samples_recorded,

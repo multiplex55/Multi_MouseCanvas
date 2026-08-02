@@ -69,7 +69,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         .add_enabled(editable, egui::Button::new("Forget current layout"))
         .clicked()
     {
-        let topology = state.canvas().current_topology.clone();
+        let topology = state.canvas().effective_topology.clone();
         state.display_profiles.forget_layout(&topology);
     }
     if editable {

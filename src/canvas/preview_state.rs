@@ -4,6 +4,13 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewViewMode {
+    #[default]
+    FitAll,
+    ActualSize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewApplyError {
     OlderGeneration,
@@ -22,6 +29,8 @@ pub struct PreviewState {
     pub latest_sequence: u64,
     pub statistics: SessionStatistics,
     pub texture_epoch: u64,
+    /// UI-only state: never enters an engine snapshot or export model.
+    pub view_mode: PreviewViewMode,
 }
 impl Default for PreviewState {
     fn default() -> Self {
@@ -32,6 +41,7 @@ impl Default for PreviewState {
             latest_sequence: 0,
             statistics: Default::default(),
             texture_epoch: 0,
+            view_mode: PreviewViewMode::FitAll,
         }
     }
 }
@@ -108,7 +118,9 @@ impl PreviewState {
             self.revisions.insert(d.coordinate, d.revision);
         }
         self.canvas.session_desktop_bounds = s.session_bounds;
-        self.canvas.current_topology = s.effective_topology.clone();
+        self.canvas.detected_topology = s.detected_topology.clone();
+        self.canvas.effective_topology = s.effective_topology.clone();
+        self.canvas.topology_history = s.topology_history.clone();
         self.canvas.active_movement_overlay = s.active_path_overlay.clone();
         self.canvas.active_dwell_overlay = s.active_dwell_overlay.clone();
         self.statistics = s.statistics.clone();

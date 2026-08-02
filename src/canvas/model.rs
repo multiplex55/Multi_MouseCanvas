@@ -9,6 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use thiserror::Error;
 
 pub const DEFAULT_CANVAS_WIDTH: f32 = 1920.0;
 pub const DEFAULT_CANVAS_HEIGHT: f32 = 1080.0;
@@ -112,7 +113,13 @@ pub struct CanvasModel {
     pub background: CanvasBackground,
     pub sparse_tiles: SparseTileStore,
     pub session_desktop_bounds: VirtualDesktopBounds,
-    pub current_topology: DisplayTopology,
+    #[serde(default = "empty_topology")]
+    pub detected_topology: DisplayTopology,
+    #[serde(alias = "current_topology", default = "empty_topology")]
+    pub effective_topology: DisplayTopology,
+    #[serde(default)]
+    pub active_profile_monitor_keys: Vec<String>,
+    #[serde(default)]
     pub topology_history: TopologyHistory,
     pub active_movement_overlay: Option<MovementPath>,
     pub active_dwell_overlay: Option<DwellShape>,
@@ -124,15 +131,15 @@ pub struct CanvasModel {
 
 impl Default for CanvasModel {
     fn default() -> Self {
-        let current_topology = DisplayTopology::default();
-        let session_desktop_bounds = current_topology.bounds().unwrap_or_else(|| {
-            VirtualDesktopBounds::new(0.0, 0.0, DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT)
-        });
+        let session_desktop_bounds =
+            VirtualDesktopBounds::new(0.0, 0.0, DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT);
         Self {
             background: CanvasBackground::default(),
             sparse_tiles: SparseTileStore::default(),
             session_desktop_bounds,
-            current_topology,
+            detected_topology: DisplayTopology::new(vec![]),
+            effective_topology: DisplayTopology::new(vec![]),
+            active_profile_monitor_keys: vec![],
             topology_history: TopologyHistory::default(),
             active_movement_overlay: None,
             active_dwell_overlay: None,
@@ -147,6 +154,24 @@ impl Default for CanvasModel {
 }
 
 impl CanvasModel {
+    pub fn begin_session(
+        &mut self,
+        effective_topology: DisplayTopology,
+    ) -> Result<(), BeginSessionError> {
+        let bounds = effective_topology
+            .bounds()
+            .ok_or(BeginSessionError::EmptyEffectiveTopology)?;
+        self.sparse_tiles.tiles.clear();
+        self.active_movement_overlay = None;
+        self.active_dwell_overlay = None;
+        self.session_desktop_bounds = bounds;
+        self.effective_topology = effective_topology.clone();
+        self.topology_history = TopologyHistory::default();
+        self.topology_history.record_if_changed(effective_topology);
+        self.tile_generation = self.tile_generation.saturating_add(1);
+        self.refresh_dimensions();
+        Ok(())
+    }
     pub fn clear(&mut self) {
         self.sparse_tiles.tiles.clear();
         self.active_movement_overlay = None;
@@ -168,6 +193,16 @@ impl CanvasModel {
     pub fn refresh_dimensions(&mut self) {
         self.dimensions = self.canvas_dimensions();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum BeginSessionError {
+    #[error("the effective display topology is empty")]
+    EmptyEffectiveTopology,
+}
+
+fn empty_topology() -> DisplayTopology {
+    DisplayTopology::new(vec![])
 }
 
 pub fn dwell_size(duration: Duration, min_size: f32, max_size: f32, growth_rate: f32) -> f32 {
@@ -229,6 +264,31 @@ pub fn point_distance(a: CanvasPoint, b: CanvasPoint) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::{coordinates::DesktopRect, topology::Monitor};
+
+    #[test]
+    fn begin_session_replaces_placeholder_with_exact_negative_bounds() {
+        let mut canvas = CanvasModel::default();
+        let topology = DisplayTopology::new(vec![
+            Monitor::new("left", DesktopRect::new(-1280., -100., 0., 924.), false),
+            Monitor::new("main", DesktopRect::new(0., 0., 1920., 1080.), true),
+        ]);
+        canvas.begin_session(topology.clone()).unwrap();
+        assert_eq!(canvas.session_desktop_bounds, topology.bounds().unwrap());
+        assert_eq!(canvas.topology_history.entries, vec![topology]);
+        assert_eq!(canvas.tile_generation, 1);
+    }
+
+    #[test]
+    fn begin_session_rejects_empty_topology_without_mutation() {
+        let mut canvas = CanvasModel::default();
+        let before = canvas.session_desktop_bounds;
+        assert_eq!(
+            canvas.begin_session(DisplayTopology::new(vec![])),
+            Err(BeginSessionError::EmptyEffectiveTopology)
+        );
+        assert_eq!(canvas.session_desktop_bounds, before);
+    }
 
     #[test]
     fn point_simplification_merges_near_identical_points() {

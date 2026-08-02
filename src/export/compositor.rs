@@ -61,7 +61,7 @@ pub fn compose(canvas: &CanvasModel, options: &ExportOptions) -> RgbaImage {
     if options.panels.monitor_outlines {
         overlays::draw_monitors(
             &mut art,
-            &canvas.current_topology,
+            &canvas.effective_topology,
             b,
             options.scale.ratio(),
             options.panels.monitor_labels,
