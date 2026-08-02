@@ -73,7 +73,7 @@ mod imp {
             self.start.set_enabled(
                 !lifecycle.is_preparing()
                     && state.recording_status == RecordingStatus::Stopped
-                    && state.canvas.is_empty(),
+                    && state.preview.is_empty(),
             );
             self.pause
                 .set_text(if state.recording_status == RecordingStatus::Paused {
@@ -88,7 +88,7 @@ mod imp {
                 !lifecycle.is_preparing() && state.recording_status != RecordingStatus::Stopped,
             );
             self.export
-                .set_enabled(!state.canvas.is_empty() && !state.export_busy);
+                .set_enabled(!state.preview.is_empty() && !state.export_busy);
             self.exit.set_enabled(!lifecycle.is_preparing());
         }
     }

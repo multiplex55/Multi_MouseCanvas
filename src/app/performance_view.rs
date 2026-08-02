@@ -29,16 +29,16 @@ impl PerformanceDiagnostics {
             return false;
         }
         self.last_update = now;
-        self.allocated_tile_count = state.canvas.sparse_tiles.touched_tile_count();
+        self.allocated_tile_count = state.canvas().sparse_tiles.touched_tile_count();
         self.dirty_tile_count = state
-            .canvas
+            .canvas()
             .sparse_tiles
             .tiles
             .values()
             .filter(|t| t.preview_dirty)
             .count();
-        self.active_geometry_count = usize::from(state.canvas.active_movement_overlay.is_some())
-            + usize::from(state.canvas.active_dwell_overlay.is_some());
+        self.active_geometry_count = usize::from(state.canvas().active_movement_overlay.is_some())
+            + usize::from(state.canvas().active_dwell_overlay.is_some());
         self.samples_processed = state.statistics.samples_recorded;
         self.process_memory_bytes = current_process_memory_bytes();
         true

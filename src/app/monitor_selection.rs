@@ -1,3 +1,4 @@
+use crate::session::events::{EngineCommand, ResolvedDisplayProfile};
 use crate::{
     app::state::AppState, canvas::topology::DisplayTopology, display_profiles::SavedDisplayProfile,
 };
@@ -109,9 +110,14 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                         }
                     }
                 }
-                state.canvas.current_topology = snapshot.effective_topology.clone();
+                let resolved = ResolvedDisplayProfile {
+                    settings: Arc::new(state.settings.clone()),
+                    detected_topology: current,
+                    effective_topology: snapshot.effective_topology.clone(),
+                    profile: Arc::new(snapshot.clone()),
+                };
+                state.queue(EngineCommand::Start(resolved));
                 state.active_display_profile = Some(Arc::new(snapshot));
-                state.start_recording();
                 return;
             }
             Ok(current) => {

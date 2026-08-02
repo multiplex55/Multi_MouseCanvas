@@ -26,6 +26,13 @@ struct CachedTexture {
     texture: TextureHandle,
 }
 impl TilePreviewCache {
+    pub fn accept_generation(&mut self, generation: u64) {
+        if self.generation != Some(generation) {
+            self.textures.clear();
+            self.test_revisions.clear();
+            self.generation = Some(generation);
+        }
+    }
     pub fn cached_tile_count(&self) -> usize {
         self.textures.len()
     }
@@ -74,6 +81,7 @@ pub fn render(
     available: Vec2,
     cache: &mut TilePreviewCache,
 ) {
+    cache.accept_generation(canvas.tile_generation);
     let mut transform = preview_scale(available, canvas.canvas_dimensions());
     let (resp, painter) = ui.allocate_painter(transform.size, egui::Sense::hover());
     let rect = resp.rect;

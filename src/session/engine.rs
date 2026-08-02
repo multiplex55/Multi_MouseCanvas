@@ -3,7 +3,10 @@ use super::{
     error::EngineError,
     events::{EngineCommand, ResolvedDisplayProfile},
     model::RecordingStatus,
-    snapshot::{EngineActivity, SessionSnapshot, SnapshotDeduper, TileDelta},
+    snapshot::{
+        CaptureHealth, EngineActivity, EngineConnectionState, SamplerState, SessionSnapshot,
+        SnapshotDeduper, TileDelta,
+    },
     statistics::SessionStatistics,
 };
 use crate::{
@@ -154,6 +157,7 @@ pub struct RecordingEngine {
     detected_topology: crate::canvas::topology::DisplayTopology,
     profile: Option<crate::display_profiles::ImmutableDisplayProfileSnapshot>,
     excluded: bool,
+    last_observed_at: Option<Instant>,
 }
 impl RecordingEngine {
     pub fn new(settings: AppSettings, fg: Option<Box<dyn ForegroundResolver>>) -> Self {
@@ -207,6 +211,7 @@ impl RecordingEngine {
             detected_topology: Default::default(),
             profile: None,
             excluded: false,
+            last_observed_at: None,
         }
     }
     fn run(
@@ -335,6 +340,7 @@ impl RecordingEngine {
                 }
             }
             EngineCommand::UpdateDrawingStyle(s) | EngineCommand::UpdateBackground(s) => {
+                self.flush_all(DiscontinuityReason::PauseResume);
                 self.settings = s
             }
             EngineCommand::UpdateApplicationColorRules(r) => self.settings.application_colors = r,
@@ -370,7 +376,17 @@ impl RecordingEngine {
     }
     fn accept_sample(&mut self, s: CursorSample) {
         self.statistics.observed_samples += 1;
+        self.last_observed_at = Some((self.monotonic_now)());
         let point = crate::canvas::coordinates::DesktopPoint::new(s.physical_x, s.physical_y);
+        if !self.detected_topology.monitors.is_empty()
+            && self.detected_topology.monitor_containing(point).is_none()
+        {
+            if !self.excluded {
+                self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
+                self.excluded = true;
+            }
+            return;
+        }
         if self.detected_topology.monitor_containing(point).is_some()
             && self
                 .canvas
@@ -395,15 +411,26 @@ impl RecordingEngine {
                 .mark_discontinuity(DiscontinuityReason::PauseResume);
             self.force_discontinuity = false
         }
+        let previous_identity = self.current_foreground.identity.clone();
         self.resolve_foreground_bounded();
-        let color = self.settings.application_colors.color_for(
-            &self.current_foreground.identity,
-            &self.settings.default_movement_color,
-        );
+        if self.current_foreground.identity != previous_identity {
+            self.flush_all(DiscontinuityReason::DisplayConfigurationChanged);
+            self.classifier
+                .mark_discontinuity(DiscontinuityReason::DisplayConfigurationChanged);
+        }
+        let color = if self.settings.app_specific_coloring_enabled {
+            self.settings.application_colors.color_for(
+                &self.current_foreground.identity,
+                &self.settings.default_movement_color,
+            )
+        } else {
+            self.settings.default_movement_color.clone()
+        };
         self.classifier
             .set_foreground_context(self.current_foreground.identity.clone(), color);
         self.classifier.accept_sample(s);
-        self.statistics.current_dwell_duration = self.classifier.current_dwell_duration()
+        self.statistics.current_dwell_duration = self.classifier.current_dwell_duration();
+        self.sync_live_overlays();
     }
     fn resolve_foreground_bounded(&mut self) {
         let now = (self.monotonic_now)();
@@ -473,6 +500,38 @@ impl RecordingEngine {
         }
         self.statistics.active_tile_count = self.canvas.sparse_tiles.tiles.len()
     }
+    fn sync_live_overlays(&mut self) {
+        self.canvas.active_movement_overlay = self.classifier.active_segment().map(|seg| {
+            let mut p = MovementPath::new(seg.color.clone(), self.settings.line_width_px, false);
+            p.application = seg.application.clone();
+            p.points = seg
+                .points
+                .iter()
+                .map(|(x, y)| crate::canvas::coordinates::CanvasPoint { x: *x, y: *y })
+                .collect();
+            p
+        });
+        self.canvas.active_dwell_overlay = self.classifier.active_dwell().map(|d| {
+            let mut shape = DwellShape::from_duration(
+                crate::canvas::coordinates::CanvasPoint {
+                    x: d.center_x,
+                    y: d.center_y,
+                },
+                d.duration,
+                d.color.clone(),
+                self.settings.selected_dwell_shape,
+                self.settings.min_dwell_shape_size,
+                self.settings.max_dwell_shape_size,
+                self.settings.dwell_growth_rate,
+                self.settings.dwell_fill_opacity,
+                self.settings.dwell_outline_width,
+                self.settings.dwell_render_mode,
+                false,
+            );
+            shape.application = d.application.clone();
+            shape
+        });
+    }
     fn publish(&mut self, tx: &SyncSender<SessionSnapshot>, immediate: bool) {
         let now = (self.monotonic_now)();
         let cadence = if self.status == RecordingStatus::Recording {
@@ -534,6 +593,19 @@ impl RecordingEngine {
             .map(|d| (d.coordinate, d.revision))
             .collect();
         let snap = SessionSnapshot {
+            capture_health: CaptureHealth {
+                engine: EngineConnectionState::Connected,
+                sampler: if self.sampler.is_some() {
+                    SamplerState::Running
+                } else {
+                    SamplerState::Stopped
+                },
+                since_last_observed_sample: self
+                    .last_observed_at
+                    .map(|t| now.saturating_duration_since(t)),
+                last_engine_sequence: self.sequence,
+                engine_error: self.errors.last().map(|e| e.to_string()),
+            },
             recording_status: self.status,
             session_id: None,
             detected_topology: self.detected_topology.clone(),

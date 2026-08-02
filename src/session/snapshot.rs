@@ -9,6 +9,25 @@ use crate::{
 };
 use std::{collections::HashMap, sync::Arc};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineConnectionState {
+    Connected,
+    Disconnected,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplerState {
+    Running,
+    Stopped,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureHealth {
+    pub engine: EngineConnectionState,
+    pub sampler: SamplerState,
+    pub since_last_observed_sample: Option<std::time::Duration>,
+    pub last_engine_sequence: u64,
+    pub engine_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileDelta {
     pub coordinate: TileCoordinate,
@@ -28,6 +47,7 @@ pub struct EngineActivity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshot {
+    pub capture_health: CaptureHealth,
     pub recording_status: RecordingStatus,
     pub session_id: Option<String>,
     pub detected_topology: DisplayTopology,
@@ -58,7 +78,7 @@ struct SnapshotKey {
     status: RecordingStatus,
     generation: u64,
     revisions: Vec<(TileCoordinate, u64, bool)>,
-    overlay_key: (usize, bool),
+    overlay_key: (usize, Option<(u64, u32, i32, i32)>),
     stats: (u64, u64, u64),
     activity: EngineActivity,
     message_count: usize,
@@ -85,7 +105,14 @@ impl SnapshotDeduper {
                 next.active_path_overlay
                     .as_ref()
                     .map_or(0, |p| p.points.len()),
-                next.active_dwell_overlay.is_some(),
+                next.active_dwell_overlay.as_ref().map(|d| {
+                    (
+                        d.duration.as_millis() as u64,
+                        d.size.to_bits(),
+                        d.center.x as i32,
+                        d.center.y as i32,
+                    )
+                }),
             ),
             stats: (
                 next.sampler_observed,
