@@ -1,29 +1,28 @@
-use crate::{
-    app::{commands::AppCommand, state::AppState},
-    session::model::RecordingStatus,
-};
+use crate::app::{commands::AppCommand, state::AppState};
 use eframe::egui;
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
+        let policy = crate::app::action_policy::action_policy(
+            state.recording_status,
+            state.pending_transition.is_some(),
+            state.export_busy,
+            !state.preview.is_empty(),
+            state.capture_health.as_ref().is_none_or(|h| {
+                h.engine == crate::session::snapshot::EngineConnectionState::Connected
+            }),
+            false,
+        );
         ui.heading("MultiMouseCanvas");
         if ui
-            .add_enabled(
-                state.recording_status == RecordingStatus::Stopped,
-                egui::Button::new("Start"),
-            )
+            .add_enabled(policy.start.enabled, egui::Button::new(policy.start.label))
             .clicked()
         {
             state.apply_command(AppCommand::StartRecording);
         }
-        let pause = if state.recording_status == RecordingStatus::Paused {
-            "Resume"
-        } else {
-            "Pause"
-        };
         if ui
             .add_enabled(
-                state.recording_status != RecordingStatus::Stopped,
-                egui::Button::new(pause),
+                policy.pause_resume.enabled,
+                egui::Button::new(policy.pause_resume.label),
             )
             .clicked()
         {
@@ -31,20 +30,26 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         }
         if ui
             .add_enabled(
-                state.recording_status != RecordingStatus::Stopped,
-                egui::Button::new("Finish"),
+                policy.finish.enabled,
+                egui::Button::new(policy.finish.label),
             )
             .clicked()
         {
             state.apply_command(AppCommand::FinishSession);
         }
         if ui
-            .add_enabled(!state.preview.is_empty(), egui::Button::new("Export PNG"))
+            .add_enabled(
+                policy.export.enabled,
+                egui::Button::new(policy.export.label),
+            )
             .clicked()
         {
             state.apply_command(AppCommand::ExportCurrentCanvas);
         }
-        if ui.button("Clear").clicked() {
+        if ui
+            .add_enabled(policy.clear.enabled, egui::Button::new(policy.clear.label))
+            .clicked()
+        {
             state.request_clear_canvas_confirmation();
         }
         let response = ui.add_enabled(state.tray_available, egui::Button::new("Minimize to tray"));

@@ -116,7 +116,11 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     effective_topology: snapshot.effective_topology.clone(),
                     profile: Arc::new(snapshot.clone()),
                 };
-                state.queue(EngineCommand::Start(resolved));
+                state.queue_transition(
+                    EngineCommand::Start(crate::session::events::TransitionRequest::new(resolved)),
+                    crate::session::events::TransitionKind::Start,
+                    crate::session::model::RecordingStatus::Recording,
+                );
                 state.active_display_profile = Some(Arc::new(snapshot));
                 return;
             }

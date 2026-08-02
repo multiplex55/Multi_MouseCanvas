@@ -43,7 +43,27 @@ pub fn show(
             });
     }
     if state.pending_new_session_decision {
-        egui::Window::new("Start new session?").collapsible(false).show(ctx, |ui| { ui.label("Existing activity is present. Choose how to proceed; no unexported canvas data will be silently deleted."); ui.horizontal(|ui| { if ui.button("Resume if paused").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} if ui.button("Preserve recovery and start new session").clicked(){state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);} if ui.button("Export and start new session").clicked(){state.export_and_start_new_session();} if ui.button("Cancel").clicked(){state.resolve_new_session(NewSessionOutcome::Cancel);} }); });
+        egui::Window::new("Start new session?")
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("Choose what to do with the completed session.");
+                if ui
+                    .button("Preserve completed session and start new")
+                    .clicked()
+                {
+                    state.queue(crate::session::events::EngineCommand::RequestRecoveryCheckpoint);
+                    state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);
+                }
+                if ui.button("Export and start new").clicked() {
+                    state.export_and_start_new_session();
+                }
+                if ui.button("Clear and start new").clicked() {
+                    state.resolve_new_session(NewSessionOutcome::ClearPreviousCanvas);
+                }
+                if ui.button("Cancel").clicked() {
+                    state.resolve_new_session(NewSessionOutcome::Cancel);
+                }
+            });
     }
     if state.lifecycle_dialogs.clear_confirmation_open {
         egui::Window::new("Clear canvas?")

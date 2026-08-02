@@ -68,27 +68,22 @@ mod imp {
             state: &crate::app::state::AppState,
             lifecycle: &crate::app::lifecycle::LifecycleCoordinator,
         ) {
-            use crate::session::model::RecordingStatus;
+            let policy = crate::app::action_policy::action_policy(
+                state.recording_status,
+                state.pending_transition.is_some(),
+                state.export_busy,
+                !state.preview.is_empty(),
+                state.capture_health.as_ref().is_none_or(|h| {
+                    h.engine == crate::session::snapshot::EngineConnectionState::Connected
+                }),
+                lifecycle.is_preparing(),
+            );
             self.show.set_enabled(!lifecycle.is_preparing());
-            self.start.set_enabled(
-                !lifecycle.is_preparing()
-                    && state.recording_status == RecordingStatus::Stopped
-                    && state.preview.is_empty(),
-            );
-            self.pause
-                .set_text(if state.recording_status == RecordingStatus::Paused {
-                    "Resume"
-                } else {
-                    "Pause"
-                });
-            self.pause.set_enabled(
-                !lifecycle.is_preparing() && state.recording_status != RecordingStatus::Stopped,
-            );
-            self.finish.set_enabled(
-                !lifecycle.is_preparing() && state.recording_status != RecordingStatus::Stopped,
-            );
-            self.export
-                .set_enabled(!state.preview.is_empty() && !state.export_busy);
+            self.start.set_enabled(policy.start.enabled);
+            self.pause.set_text(policy.pause_resume.label);
+            self.pause.set_enabled(policy.pause_resume.enabled);
+            self.finish.set_enabled(policy.finish.enabled);
+            self.export.set_enabled(policy.export.enabled);
             self.exit.set_enabled(!lifecycle.is_preparing());
         }
     }
