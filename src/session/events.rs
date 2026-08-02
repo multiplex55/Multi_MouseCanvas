@@ -129,6 +129,9 @@ pub struct TransitionAcknowledgment {
     pub kind: TransitionKind,
     pub status: crate::session::model::RecordingStatus,
     pub result: TransitionResult,
+    /// Engine ordering coordinates at the point the transition was applied.
+    pub sequence: u64,
+    pub generation: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FullStateRequestId(u64);
@@ -163,7 +166,6 @@ pub enum EngineCommand {
     UpdateBackground(AppSettings),
     SetUiVisibility(bool),
     RequestExport(ExportRequest),
-    RequestRecoveryCheckpoint,
     RequestSnapshot,
     RequireFullState(FullStateRequestId),
     PrepareShutdown(ShutdownRequest, Sender<ShutdownResult>),
@@ -178,7 +180,6 @@ impl EngineCommand {
             | Self::Clear(_)
             | Self::PrepareShutdown(..)
             | Self::ForceShutdown
-            | Self::RequestRecoveryCheckpoint
             | Self::InvalidateTopology
             | Self::RefreshTopology(_) => CommandPriority::High,
             Self::Start(_)

@@ -24,11 +24,17 @@ Settings are stored in the platform configuration directory (normally `%APPDATA%
 
 ## Export
 
-The tiled compositor exports **PNG or WebP**, with approved scale presets/custom validated scale, and either transparent, solid-color, or canvas backgrounds. Monitor outlines/labels are optional export overlays. Large desktops consume memory proportional to the output dimensions during encoding, so reduce scale when the requested image approaches system memory limits.
+The tiled compositor exports PNG while Recording, Paused, or Finished. The export is an immutable snapshot with exact historical desktop dimensions and can include the active movement/dwell and optional monitor overlays. Success reports the collision-safe output path (which can be opened in Explorer); failures remain visible and offer a manual Retry. Export activity is secondary to capture, so completion never changes or confirms the recording lifecycle.
+
+Preview **Fit All** preserves the complete historical desktop union in the available viewport. **100% / Actual Size** maps one canvas pixel to one screen pixel and permits navigation without rescaling the artwork.
 
 ## Commands and lifecycle
 
 UI, tray, IPC, and CLI all route the same Start, Pause, Resume, Finish, Export, Show, and Exit command model. A second instance forwards commands to the running instance.
+
+The visible recording status is always the last state confirmed by the engine. A Start, Pause, Resume, Finish, or Clear request is displayed separately as pending. If no matching acknowledgment arrives within two seconds, the UI preserves the canvas, reports a persistent timeout, and requests a correlated full-state resynchronization; only that authoritative response clears reconciliation.
+
+Pause stops sampling without finalizing or discarding the session. Resume starts a new discontinuous segment so time away cannot create a connecting line. Finish stops sampling and retains the canvas for export. Starting from Finished always asks whether to preserve/export, export then replace, clear then replace, or cancel; export must complete successfully before an export-and-replace workflow clears anything.
 
 ```text
 --show --start --pause --resume --finish --export --exit --help

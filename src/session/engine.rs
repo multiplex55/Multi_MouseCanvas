@@ -243,7 +243,11 @@ impl RecordingEngine {
             excluded: false,
             last_observed_at: None,
             full_state_request_id: None,
-            activity: EngineActivity::default(),
+            activity: EngineActivity {
+                export: ExportState::Idle,
+                last_export_result: None,
+                recovery_in_progress: false,
+            },
             export_rx: None,
             active_export: None,
         }
@@ -456,6 +460,8 @@ impl RecordingEngine {
                     kind,
                     status: self.status,
                     result: TransitionResult::Rejected(TransitionRejection::ShutdownInProgress),
+                    sequence: self.sequence,
+                    generation: self.generation,
                 });
             }
             return CommandEffect::PublishImmediately;
@@ -644,7 +650,13 @@ impl RecordingEngine {
                 }
                 self.canvas.detected_topology = t;
             }
-            EngineCommand::RefreshTopology(None) | EngineCommand::InvalidateTopology => {}
+            EngineCommand::RefreshTopology(None) | EngineCommand::InvalidateTopology => {
+                self.status_messages.push(
+                    "Display topology refresh was unavailable; the prior topology was retained."
+                        .into(),
+                );
+                return CommandEffect::PublishImmediately;
+            }
             EngineCommand::SetUiVisibility(v) => self.ui_visible = v,
             EngineCommand::RequestSnapshot => {
                 self.full_snapshot = true;
@@ -663,7 +675,6 @@ impl RecordingEngine {
                 self.full_snapshot = true
             }
             EngineCommand::RequestExport(request) => return self.request_export(request),
-            EngineCommand::RequestRecoveryCheckpoint => {}
             EngineCommand::PrepareShutdown(request, result_tx) => {
                 self.shutting_down = true;
                 self.stop_sampler();
@@ -681,7 +692,7 @@ impl RecordingEngine {
                                 id,
                                 now,
                                 now,
-                                false,
+                                self.status == RecordingStatus::Finished,
                                 self.status,
                                 &self.canvas,
                                 self.statistics.clone(),
@@ -738,6 +749,8 @@ impl RecordingEngine {
             kind,
             status: self.status,
             result: TransitionResult::Success,
+            sequence: self.sequence,
+            generation: self.generation,
         });
     }
     fn reject(
@@ -752,6 +765,8 @@ impl RecordingEngine {
             kind,
             status: self.status,
             result: TransitionResult::Rejected(reason),
+            sequence: self.sequence,
+            generation: self.generation,
         });
         CommandEffect::PublishImmediately
     }

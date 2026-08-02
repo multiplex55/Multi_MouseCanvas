@@ -52,6 +52,28 @@ impl PreviewState {
     pub fn is_empty(&self) -> bool {
         self.canvas.is_empty()
     }
+    /// Invalidates every cache whose identity is scoped to an engine generation.
+    pub fn invalidate_generation(&mut self, generation: u64) {
+        if generation <= self.generation {
+            return;
+        }
+        self.canvas.clear();
+        self.revisions.clear();
+        self.texture_epoch = self.texture_epoch.saturating_add(1);
+        self.generation = generation;
+        self.canvas.tile_generation = generation;
+        self.latest_sequence = 0;
+    }
+
+    /// A correlated full-state response is a protocol barrier, not a delta.
+    pub fn prepare_authoritative_full_state(&mut self, generation: u64) {
+        self.canvas.clear();
+        self.revisions.clear();
+        self.texture_epoch = self.texture_epoch.saturating_add(1);
+        self.generation = generation;
+        self.canvas.tile_generation = generation;
+        self.latest_sequence = 0;
+    }
     pub fn apply_snapshot(&mut self, s: &SessionSnapshot) -> Result<(), PreviewApplyError> {
         if s.generation < self.generation {
             return Err(PreviewApplyError::OlderGeneration);
@@ -69,12 +91,7 @@ impl PreviewState {
             return Err(PreviewApplyError::InvalidPixels);
         }
         if s.generation > self.generation {
-            self.canvas.clear();
-            self.revisions.clear();
-            self.texture_epoch += 1;
-            self.generation = s.generation;
-            self.canvas.tile_generation = s.generation;
-            self.latest_sequence = 0;
+            self.invalidate_generation(s.generation);
         }
         let incoming: HashSet<_> = s
             .tile_deltas
@@ -126,5 +143,28 @@ impl PreviewState {
         self.statistics = s.statistics.clone();
         self.latest_sequence = s.sequence;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn generation_change_invalidates_canvas_revisions_and_textures() {
+        let mut preview = PreviewState::default();
+        preview.revisions.insert(
+            crate::canvas::coordinates::TileCoordinate { x: 4, y: -2 },
+            9,
+        );
+        let epoch = preview.texture_epoch;
+
+        preview.invalidate_generation(7);
+
+        assert_eq!(preview.generation, 7);
+        assert_eq!(preview.latest_sequence, 0);
+        assert!(preview.revisions.is_empty());
+        assert!(preview.canvas.is_empty());
+        assert!(preview.texture_epoch > epoch);
     }
 }

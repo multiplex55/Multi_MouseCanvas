@@ -49,6 +49,12 @@ pub fn show(
         let stats = &state.statistics;
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Status: {:?}", state.recording_status));
+            if let Some(pending) = &state.pending_transition {
+                ui.label(format!("Pending: {:?}", pending.kind));
+            }
+            if state.export_busy() {
+                ui.label("Activity: Exporting");
+            }
             ui.separator();
             ui.label(format!("Samples: {}", stats.samples_recorded));
             ui.separator();
@@ -71,6 +77,23 @@ pub fn show(
             if let Some(h) = &state.capture_health {
                 ui.label(format!("Engine: {:?}", h.engine));
                 ui.label(format!("Sampler: {:?}", h.sampler));
+                let healthy = match state.recording_status {
+                    crate::session::model::RecordingStatus::Recording => {
+                        h.sampler == crate::session::snapshot::SamplerState::Running
+                            && h.since_last_observed_sample
+                                .is_some_and(|age| age < std::time::Duration::from_secs(2))
+                    }
+                    crate::session::model::RecordingStatus::Paused
+                    | crate::session::model::RecordingStatus::Finished
+                    | crate::session::model::RecordingStatus::Stopped => {
+                        h.sampler == crate::session::snapshot::SamplerState::Stopped
+                    }
+                };
+                ui.label(if healthy {
+                    "Capture: healthy"
+                } else {
+                    "Capture: attention required"
+                });
                 ui.label(format!(
                     "Last sample: {}",
                     h.since_last_observed_sample
